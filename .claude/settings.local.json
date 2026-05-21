@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go mod *)",
+      "Bash(go tool *)",
+      "Bash(gofmt -e internal/documents/scope_statement.go internal/documents/project_budget.go internal/documents/requirements.go)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(cd \"/Users/jamesburns/Documents/Claude/Projects/Projects Management Desktop Application Project/PMForge - Go + Typescript Based Project Management Application\" && ls build/bin/ 2>/dev/null; ls -d /Applications/PMForge* 2>/dev/null; find . -maxdepth 4 -name \"PMForge*\" -type f 2>/dev/null | head; which wails 2>&1)",
+      "Bash(gofmt -e internal/documents/issue_log.go)",
+      "Bash(gofmt -e internal/documents/change_request.go)",
+      "Bash(gofmt -e internal/documents/procurement_plan.go)",
+      "Bash(gofmt -e internal/documents/team_charter.go)",
+      "Bash(gofmt -e internal/documents/execution_plan.go)",
+      "Bash(gofmt -e internal/documents/wbs_document.go)",
+      "Bash(gofmt -e internal/documents/raci_document.go)",
+      "Bash(gofmt -e internal/documents/project_proposal.go)",
+      "Bash(gofmt -e internal/documents/project_schedule.go)",
+      "Bash(gofmt -e internal/documents/project_brief.go internal/documents/project_overview.go)",
+      "Bash(gofmt -e internal/export/pdfa.go internal/export/pdfa_test.go)",
+      "Bash(mkdir -p /tmp/pdfa_isolated)",
+      "Read(//tmp/**)",
+      "Bash(cat)",
+      "Bash(sed 's/^package export$/package main/' \"/Users/jamesburns/Documents/Claude/Projects/Projects Management Desktop Application Project/PMForge - Go + Typescript Based Project Management Application/internal/export/pdfa_test.go\")",
+      "Read(//private/tmp/pdfa_isolated/**)",
+      "Bash(go test *)",
+      "Bash(grep -l \"pmforge/internal/documents\" internal/export/*.go)",
+      "Bash(grep -l \"pmforge/internal/export\" internal/documents/*.go)",
+      "Bash(gofmt -e internal/pdfmeta/pdfmeta.go internal/pdfmeta/pdfmeta_test.go internal/export/pdfa.go internal/documents/charter.go)"
+    ]
+  }
+}
