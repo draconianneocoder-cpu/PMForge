@@ -21,6 +21,10 @@ SPDX-License-Identifier: GFDL-1.3-or-later
 
 ## Completed This Session
 
+- Committed the broad staged release bundle as `4c7f7d9` with message
+  `Complete release hardening and validation bundle`.
+- Committed the Timeline date-dragging slice with message
+  `Add timeline date dragging`.
 - Installed and verified `reuse` 6.2.0 via `pipx`.
 - Added/organized tracked license and asset metadata for REUSE compliance.
 - Replaced stale ICC download handling with a tracked compact CC0 sRGB ICC profile and updated `scripts/fetch-icc.sh`.
@@ -32,6 +36,22 @@ SPDX-License-Identifier: GFDL-1.3-or-later
 - Normalized the validation staging boundary: PAdES/PDF validation scripts, PDF/A helpers, README/AGENT memory notes, `internal/export/pdf.go`, `internal/pdfmeta/*`, and `internal/crypto/pdf_sign_test.go` are staged with the current release bundle.
 - Partially staged `internal/crypto/pdf_sign.go` with only the RFC 5035 `SigningCertificateV2` CMS attribute hunk. The separate PKCS#12 loader rewrite remains unstaged.
 - Updated README, AGENT, and project memory notes for the PAdES local validation gate.
+- Narrowed the root `.gitignore` build-output rule from `pmforge` to `/pmforge`
+  so the `cmd/pmforge` source tree is no longer hidden; generated
+  `cmd/pmforge/frontend/dist/` output remains ignored.
+- Updated `make license-check` to remove generated Wails embed output and
+  `.DS_Store` files before REUSE scans the working tree.
+- Updated `scripts/check-release.sh` to remove generated embed output before
+  direct REUSE linting, rebuild/copy `cmd/pmforge/frontend/dist/`, then run
+  release-scope, memory-safety, race, and build checks against an available
+  embedded frontend tree.
+- Added Timeline date moving for editable project and sprint boundaries:
+  `project_start`, `project_end`, `sprint_start`, and `sprint_end`.
+- Kept deployment timeline entries read-only because they are DORA history.
+- Added pointer dragging, date inputs, and keyboard day nudges to
+  `TimelineView.svelte` for editable entries.
+- Added Wails bridge typing and backend regression coverage for
+  `MoveTimelineEntry`.
 
 ## Verification Evidence
 
@@ -50,6 +70,14 @@ SPDX-License-Identifier: GFDL-1.3-or-later
 - `make check-release`
 - `git diff -- internal/crypto/pdf_sign.go`
 - `git diff --cached -- internal/crypto/pdf_sign.go`
+- `go test -count=1 ./cmd/pmforge -run 'TestMoveTimelineEntry'`
+- `go test -count=1 ./cmd/pmforge ./internal/timeline`
+- `make frontend-stability`
+- `go test -count=1 ./cmd/... ./internal/...`
+- `make license-check` (first exposed generated embed/`.DS_Store` artifacts,
+  then passed after the release-gate cleanup fix)
+- `make check-release` (first exposed release-gate embed ordering, then passed
+  cleanly after moving frontend copy before Go-based gates)
 
 The latest `make check-release` passed and included:
 
@@ -74,14 +102,17 @@ The latest `make check-pades-external` passed with:
 
 ## Staging Notes
 
-- Staged: `.agent_memory/reuse-tracking-2026-06-05.md`, `AGENT.md`, `README.md`, `Makefile`, `scripts/check-release.sh`, `scripts/release-gate-scope-check.sh`, `scripts/validate-pades.sh`, `scripts/validate-pades-external.sh`, `scripts/validate-pdfa.sh`, `scripts/validate-pdfa-lib.sh`, `scripts/validate-pdfa-lib_test.sh`, `internal/export/pdf.go`, `internal/pdfmeta/pdfmeta.go`, `internal/pdfmeta/pdfmeta_test.go`, `internal/crypto/pdf_sign_test.go`, the SigningCertificateV2 hunk in `internal/crypto/pdf_sign.go`, `session-notes.md`, and the existing staged release bundle from earlier work.
-- Unstaged by design: the remaining `internal/crypto/pdf_sign.go` PKCS#12 loader rewrite, plus unrelated frontend/backend working-tree edits outside the validation slice.
+- Committed checkpoint: `4c7f7d9` contains the broad release bundle that was
+  previously staged.
+- Committed timeline-date-dragging slice with message
+  `Add timeline date dragging`.
+- Unstaged by design from earlier work: the remaining `internal/crypto/pdf_sign.go`
+  PKCS#12 loader rewrite, plus unrelated frontend/backend working-tree edits
+  outside the timeline date-dragging slice.
 - Generated validation artifacts are under `.tmp/pmforge-pades-test/` and `.tmp/pmforge-pdfa-test/`; both remain ignored.
 
 ## Next Steps
 
 1. Run manual Acrobat/DSS checks against `.tmp/pmforge-pades-test/signed-sample.pdf` when those validators are available.
 2. Soak the expanded PDF/A-3 gate on release builders; promote `make check-pdfa` from soft to hard only after schedule, document, and combined-report samples pass reliably there.
-3. Decide whether to commit the broad staged release bundle as one commit or split it into smaller commits. The validation surface is now staged, but the index still includes broader Sigma/frontend/release work.
-4. Defer PDM date-dragging on the Timeline until the current signing/PDF validation surface is committed and stable.
-5. Before commit or handoff, rerun `make check-pades`, `make check-pades-external`, `make license-check`, `git diff --check && git diff --cached --check`, and `make check-release`.
+3. Before handoff, rerun `make check-pades`, `make check-pades-external`, `make license-check`, `git diff --check`, and `make check-release` if any code changes after this slice.
