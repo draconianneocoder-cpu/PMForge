@@ -112,3 +112,18 @@ Verification evidence (run against a `/tmp` tmpfs copy because the working mount
 - veraPDF-unavailable (empty PATH, no Docker): strict -> exit 1 (FAIL); non-strict -> exit 0 (SKIP).
 
 Next handoff: on a machine with Docker or a preinstalled `verapdf` (and Go), rerun `make check-pdfa` and `make check-release` to confirm the strict gate end-to-end, then `make license-check` and `git diff --check` before commit. (The veraPDF GitHub-releases auto-download URL is dead/404 — provide Docker or a `verapdf` CLI on PATH in CI.)
+
+## Follow-up - 2026-06-08 Documents package unit tests
+
+- Confirmed handoff checks from the PDF/A-3 strict gate: `make check-pdfa` (strict default, veraPDF 1.28.1 on PATH), `make license-check` (274/274 files compliant), `make check-release` (all 9 gates pass). Working tree was clean.
+- Added `internal/documents/documents_test.go` with 33 tests covering the document registry (`All`, `Get`, `ByPhase`), `DefaultContent` round-trip for all 25 kinds (including the two Word/Excel alias pairs), and `TestRender_AllKindsProduceValidPDF` which smoke-tests all 25 dispatcher branches. All 33 pass race-clean.
+- Closed stale AGENT.md TODO #9 (bespoke renderers pending) — all 23 bespoke renderers + 2 aliases are confirmed wired into `renderRaw`.
+
+Verification evidence:
+
+- `go test -v -count=1 ./internal/documents/` -> 33 PASS
+- `go test -count=1 -race ./internal/documents/` -> ok
+- `make check-pdfa` -> PASSED (all three samples, strict mode)
+- `make license-check` -> compliant
+- `git diff --check && git diff --cached --check` -> clean
+- `make check-release` -> PMForge is ready for release
