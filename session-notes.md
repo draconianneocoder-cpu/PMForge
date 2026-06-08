@@ -93,3 +93,22 @@ Verification evidence:
 - `make check-release`
 - `make release-scope`
 - `bash -n scripts/release-gate-scope-check.sh`
+
+## Follow-up - 2026-06-08 PDF/A-3 gate: strict tooling-presence
+
+- Closed the remaining soft hole in the PDF/A-3 gate: `validate-pdfa.sh` previously `exit 0`d when veraPDF could not be obtained, the ICC profile was missing, or no samples were generated, so the "hard" wrapper in `check-release.sh` passed vacuously in any environment without Docker/veraPDF.
+- Added an explicit strictness switch `PMFORGE_PDFA_STRICT` (default `1`). Unmet preconditions now route through `pdfa_precondition_unmet`: strict -> `FAIL`/exit 1; non-strict -> `SKIP`/exit 0. A genuinely non-compliant sample still fails in either mode.
+- `check-release.sh` invokes the gate with `PMFORGE_PDFA_STRICT=1` explicitly. `Makefile` help text changed from "(soft gate)" to "(hard gate; PMFORGE_PDFA_STRICT=0 to skip locally)".
+- Made `ICC_PROFILE` overridable via `PMFORGE_ICC_PROFILE` for hermetic testing of the precondition branches.
+- Renderers needed no changes: all three representative samples already pass veraPDF 1.30.2 PDF/A-3b (`isCompliant="true"`, 146 passed / 0 failed rules).
+- Files touched: `scripts/validate-pdfa.sh`, `scripts/check-release.sh`, `Makefile`, `README.md`, `AGENT.md`, `session-notes.md`. No new tracked files (REUSE unaffected).
+
+Verification evidence (run against a `/tmp` tmpfs copy because the working mount blocks `rm`; Go 1.26.4 + veraPDF 1.30.2 fetched into the sandbox):
+
+- `bash -n scripts/validate-pdfa.sh scripts/check-release.sh`
+- Full `validate-pdfa.sh` happy path with real veraPDF, strict default -> all three samples OK, gate PASSED (exit 0).
+- `bash scripts/validate-pdfa-lib_test.sh` -> passed.
+- ICC-missing: strict -> exit 1 (FAIL); non-strict -> exit 0 (SKIP).
+- veraPDF-unavailable (empty PATH, no Docker): strict -> exit 1 (FAIL); non-strict -> exit 0 (SKIP).
+
+Next handoff: on a machine with Docker or a preinstalled `verapdf` (and Go), rerun `make check-pdfa` and `make check-release` to confirm the strict gate end-to-end, then `make license-check` and `git diff --check` before commit. (The veraPDF GitHub-releases auto-download URL is dead/404 — provide Docker or a `verapdf` CLI on PATH in CI.)
