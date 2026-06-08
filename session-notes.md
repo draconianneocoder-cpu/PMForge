@@ -21,10 +21,6 @@ SPDX-License-Identifier: GFDL-1.3-or-later
 
 ## Completed This Session
 
-- Committed the broad staged release bundle as `4c7f7d9` with message
-  `Complete release hardening and validation bundle`.
-- Committed the Timeline date-dragging slice with message
-  `Add timeline date dragging`.
 - Installed and verified `reuse` 6.2.0 via `pipx`.
 - Added/organized tracked license and asset metadata for REUSE compliance.
 - Replaced stale ICC download handling with a tracked compact CC0 sRGB ICC profile and updated `scripts/fetch-icc.sh`.
@@ -33,51 +29,18 @@ SPDX-License-Identifier: GFDL-1.3-or-later
 - Added embedded CMS/ByteRange verification coverage in `internal/pdfmeta/pdfmeta_test.go`.
 - Added `scripts/validate-pades.sh`, which generates `.tmp/pmforge-pades-test/signed-sample.pdf` and locally verifies the embedded CMS signature against the declared `/ByteRange`.
 - Added `make check-pades` and wired the PAdES local gate into `scripts/check-release.sh`.
-- Normalized the validation staging boundary: PAdES/PDF validation scripts, PDF/A helpers, README/AGENT memory notes, `internal/export/pdf.go`, `internal/pdfmeta/*`, and `internal/crypto/pdf_sign_test.go` are staged with the current release bundle.
-- Partially staged `internal/crypto/pdf_sign.go` with only the RFC 5035 `SigningCertificateV2` CMS attribute hunk. The separate PKCS#12 loader rewrite remains unstaged.
 - Updated README, AGENT, and project memory notes for the PAdES local validation gate.
-- Narrowed the root `.gitignore` build-output rule from `pmforge` to `/pmforge`
-  so the `cmd/pmforge` source tree is no longer hidden; generated
-  `cmd/pmforge/frontend/dist/` output remains ignored.
-- Updated `make license-check` to remove generated Wails embed output and
-  `.DS_Store` files before REUSE scans the working tree.
-- Updated `scripts/check-release.sh` to remove generated embed output before
-  direct REUSE linting, rebuild/copy `cmd/pmforge/frontend/dist/`, then run
-  release-scope, memory-safety, race, and build checks against an available
-  embedded frontend tree.
-- Added Timeline date moving for editable project and sprint boundaries:
-  `project_start`, `project_end`, `sprint_start`, and `sprint_end`.
-- Kept deployment timeline entries read-only because they are DORA history.
-- Added pointer dragging, date inputs, and keyboard day nudges to
-  `TimelineView.svelte` for editable entries.
-- Added Wails bridge typing and backend regression coverage for
-  `MoveTimelineEntry`.
 
 ## Verification Evidence
 
 - `make check-pades`
-- `make check-pades-external`
-- `make release-scope`
 - `bash -n scripts/validate-pades.sh scripts/check-release.sh`
-- `bash -n scripts/validate-pades.sh scripts/validate-pades-external.sh scripts/validate-pdfa.sh scripts/validate-pdfa-lib.sh scripts/validate-pdfa-lib_test.sh scripts/release-gate-scope-check.sh scripts/check-release.sh`
-- `bash scripts/validate-pdfa-lib_test.sh`
-- `make check-pdfa`
 - `go test -count=1 ./internal/crypto`
 - `go test -count=1 ./internal/pdfmeta`
 - `go test -count=1 ./internal/crypto ./internal/pdfmeta ./internal/export`
 - `make license-check`
 - `git diff --check && git diff --cached --check`
 - `make check-release`
-- `git diff -- internal/crypto/pdf_sign.go`
-- `git diff --cached -- internal/crypto/pdf_sign.go`
-- `go test -count=1 ./cmd/pmforge -run 'TestMoveTimelineEntry'`
-- `go test -count=1 ./cmd/pmforge ./internal/timeline`
-- `make frontend-stability`
-- `go test -count=1 ./cmd/... ./internal/...`
-- `make license-check` (first exposed generated embed/`.DS_Store` artifacts,
-  then passed after the release-gate cleanup fix)
-- `make check-release` (first exposed release-gate embed ordering, then passed
-  cleanly after moving frontend copy before Go-based gates)
 
 The latest `make check-release` passed and included:
 
@@ -91,28 +54,42 @@ The latest `make check-release` passed and included:
 - PDF/A-3 soft validation gate.
 - PAdES local validation gate.
 
-The latest `make check-pades-external` passed with:
-
-- OpenSSL 3.6.2 ASN.1 parse: PASS.
-- OpenSSL detached CMS verification against extracted `/ByteRange`: PASS.
-- `qpdf` syntax check: PASS.
-- `pdfsig` signature validation: PASS (`Certificate issuer is unknown` is expected for the self-signed gate certificate).
-- veraPDF CLI is installed and detected; the harness still records veraPDF PAdES interoperability as a manual TODO.
-- DSS CLI tooling is not installed locally, so that check is recorded as a skip in `.tmp/pmforge-pades-test/external-validation-report.txt`.
-
 ## Staging Notes
 
-- Committed checkpoint: `4c7f7d9` contains the broad release bundle that was
-  previously staged.
-- Committed timeline-date-dragging slice with message
-  `Add timeline date dragging`.
-- Unstaged by design from earlier work: the remaining `internal/crypto/pdf_sign.go`
-  PKCS#12 loader rewrite, plus unrelated frontend/backend working-tree edits
-  outside the timeline date-dragging slice.
-- Generated validation artifacts are under `.tmp/pmforge-pades-test/` and `.tmp/pmforge-pdfa-test/`; both remain ignored.
+- Staged: `.agent_memory/reuse-tracking-2026-06-05.md`, `scripts/validate-pades.sh`, and the existing staged release bundle from earlier work.
+- Unstaged by design: `Makefile`, `scripts/check-release.sh`, `README.md`, `AGENT.md`, and `internal/pdfmeta/pdfmeta_test.go` because those files already had pre-existing unstaged changes. Stage their relevant hunks deliberately before committing.
+- Generated validation artifacts are under `.tmp/pmforge-pades-test/` and remain ignored.
 
 ## Next Steps
 
-1. Run manual Acrobat/DSS checks against `.tmp/pmforge-pades-test/signed-sample.pdf` when those validators are available.
-2. Soak the expanded PDF/A-3 gate on release builders; promote `make check-pdfa` from soft to hard only after schedule, document, and combined-report samples pass reliably there.
-3. Before handoff, rerun `make check-pades`, `make check-pades-external`, `make license-check`, `git diff --check`, and `make check-release` if any code changes after this slice.
+1. Normalize the staging boundary before any commit. In particular, decide whether the PAdES changes in `internal/pdfmeta/pdfmeta.go`, `internal/pdfmeta/pdfmeta_test.go`, `Makefile`, `scripts/check-release.sh`, `README.md`, and `AGENT.md` should be staged with the current release bundle.
+2. Run external PAdES validators against `.tmp/pmforge-pades-test/signed-sample.pdf` or a signed export sample. Record results for Acrobat, DSS, and veraPDF when available.
+3. Continue PDF/A-3 strict-conformance work by making representative generated PDFs pass the veraPDF gate reliably enough to promote `make check-pdfa` from soft to hard.
+4. Decide the per-user encryption-at-rest path: SQLCipher with native build complexity, or a documented OS-level encryption stopgap for V2.
+5. Defer PDM date-dragging on the Timeline until the current signing/PDF validation surface is staged and stable.
+6. Before commit or handoff, rerun `make check-pades`, `make license-check`, `git diff --check && git diff --cached --check`, and `make check-release`.
+
+## Follow-up - 2026-06-07 DSS Baseline-B Validation
+
+- Installed DSS 6.4 separately as `dss-validation-tool` and wired `scripts/validate-pades-external.sh` to invoke it when available.
+- Replaced the generic `pkcs7.AddSigner` CMS path for PDF signing with a narrow detached CMS encoder that omits CMS `signing-time` for PAdES baseline-B while retaining `contentType`, `messageDigest`, `signingCertificateV2`, and embedded certificates.
+- Added a signed PDF signature dictionary `/M (D:YYYYMMDDHHmmSSZ)` timestamp so DSS no longer reports the PAdES baseline-B `/M` cardinality warning.
+- Tightened the local and external PAdES gates: the local gate now requires `/M`, and the DSS branch fails on PAdES baseline requirements warnings or a non-`PAdES-BASELINE-B` `signature.format`.
+- Current DSS result for `.tmp/pmforge-pades-test/signed-sample.pdf`: one signature, `signature.format=PAdES-BASELINE-B`, expected `NO_CERTIFICATE_CHAIN_FOUND` because the gate sample is self-signed and no trust source is configured.
+- Follow-up docs cleanup: README and AGENT now describe DSS as executed coverage rather than a remaining TODO, with the remaining gap narrowed to Acrobat plus trusted-chain validation using a real trusted signing source.
+- `scripts/release-gate-scope-check.sh` now requires README/AGENT to document the DSS `PAdES-BASELINE-B` result and rejects stale wording that treats DSS as unrun.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/crypto ./internal/pdfmeta ./internal/export`
+- `bash scripts/validate-pades-external_test.sh`
+- `bash scripts/validate-pades-parallel_test.sh`
+- `bash -n scripts/validate-pades.sh scripts/validate-pades-external.sh scripts/validate-pades-external_test.sh scripts/validate-pades-parallel_test.sh`
+- `make check-pades`
+- `make check-pades-external`
+- `make license-check`
+- `git diff --check`
+- `git diff --cached --check`
+- `make check-release`
+- `make release-scope`
+- `bash -n scripts/release-gate-scope-check.sh`

@@ -60,7 +60,8 @@ SPDX-License-Identifier: CC0-1.0
 - Initial `qpdf --check` exposed that the gate sample's Pages tree pointed at a stream instead of a Page dictionary; `scripts/validate-pades.sh` now generates a syntactically valid one-page PDF before signing.
 - Initial `pdfsig` validation exposed a CAdES interoperability gap: OpenSSL verified the detached CMS, but Poppler reported the signature invalid until `Signer.SignPDFCMS` added the RFC 5035 `SigningCertificateV2` signed attribute with the signer certificate's SHA-256 hash plus issuer/serial.
 - `scripts/validate-pades-external.sh` now uses `pipefail`, initializes a temporary NSS database for `pdfsig` when `certutil` is available, and fails if `qpdf` rejects the PDF or `pdfsig` does not report `Signature Validation: Signature is Valid`.
-- Current local result: `make check-pades-external` passes with OpenSSL ASN.1 parse, OpenSSL detached CMS verification, `qpdf` syntax validation, and `pdfsig` signature validation. veraPDF CLI is detected but remains a manual interoperability TODO for this PAdES sample; DSS CLI is still not installed locally.
+- Current local result: `make check-pades-external` passes with OpenSSL ASN.1 parse, OpenSSL detached CMS verification, `qpdf` syntax validation, and `pdfsig` signature validation. As of 2026-06-07, the harness also runs veraPDF signature feature extraction and verifies the sample advertises `Adobe.PPKLite` with `ETSI.CAdES.detached`; DSS CLI is still not installed locally.
+- Also as of 2026-06-07, `validate-pades.sh` and `validate-pades-external.sh` share `.tmp/pmforge-pades-test.lock` so parallel local/external validators cannot race while rebuilding or reading `.tmp/pmforge-pades-test`.
 
 ## PDF/A-3b Schedule Gate Hardening - 2026-06-06
 
