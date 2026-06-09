@@ -127,3 +127,85 @@ Verification evidence:
 - `make license-check` -> compliant
 - `git diff --check && git diff --cached --check` -> clean
 - `make check-release` -> PMForge is ready for release
+
+## Follow-up - 2026-06-09 stats package remaining engine tests
+
+- Identified `charts/stats` at 42% coverage (only Pareto and Control were tested from the 2026-06-04 session). The six remaining engines (Line, Bar, Pie, BurnUp, BurnDown, CumulativeFlow) had 0% coverage despite being pure parse+layout math.
+- Added `internal/charts/stats/stats_remaining_test.go` with 40 tests covering `ParseXxx` (empty, `{}`, invalid JSON, valid doc for Line), `LayoutXxx` for all six engines, and `computeIdealBurnDown` (n=0, empty remaining, n=1, n=5 trajectory).
+- Package now at 95.3%, race-clean. Remaining 4.7% is `ParseXxx` valid-doc success paths (implicitly exercised by layout tests) and the unreachable `out[i] < 0` clamp in `computeIdealBurnDown`.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/charts/stats/` -> ok (coverage 95.3%)
+- `go test -count=1 -race ./internal/charts/stats/` -> ok
+- `go test ./internal/... ./cmd/...` -> ALL PASS (29 packages)
+
+## Follow-up - 2026-06-08 Matrix engine layout tests
+
+- Surveyed coverage across all packages: test *presence* is saturated (only `sigma/domain`, pure type defs with zero functions, has no tests — intentional). Used coverage % to find untested *depth*.
+- Found `charts/matrix` at 29.5% vs sibling engines at 83-95%. Cause: only `raci.go` tested; `swot.go`, `stakeholder.go`, `generic.go` Parse/Layout were 0% and are pure parse+layout logic (not gofpdf glue).
+- Added `swot_test.go`, `stakeholder_test.go`, `generic_test.go`. Matrix package now 95.8%, race-clean. Remaining uncovered lines are unreachable defensive guards.
+- Rejected a tempting-but-wrong `cli` refactor (ParseFlags at 5%): those lines are `flag` registration boilerplate, uncoverable by nature; refactoring the launch entry point to test stdlib behaviour is risk without reward.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/charts/matrix/` -> ok (coverage 95.8%)
+- `go test -count=1 -race ./internal/charts/matrix/` -> ok
+- `go test ./internal/... ./cmd/...` -> ALL PASS
+
+## Follow-up - 2026-06-09 charts dispatcher and pdfmeta trivial tests
+
+- Surveyed coverage across all packages after the update+auth session. Identified `internal/charts` at 77.0% (engines.go dispatcher at 74.5%) and two zero-coverage helpers in `internal/pdfmeta` (`icc.go`, `xmlEscape`) as the next pure-logic targets.
+- Added 7 tests to `internal/charts/charts_test.go` (file now 25 functions): `TestLayout_AllKinds_RejectsBadJSON` (table test, all 20 kinds with invalid JSON), `TestLayout_Network_CycleError`, `TestLayout_PERT_CycleError`, `TestLayout_CPM_CycleError`, `TestLayout_CauseAndEffect_NilRootError` (empty doc → ErrNoRoot), `TestLayout_Workflow_CycleError`, `TestLayout_Activity_CycleError`. All parse-error and layout-error arms in `engines.go:Layout()` are now covered.
+- Added 7 tests to `internal/pdfmeta/pdfmeta_test.go`: `TestXmlEscape_Empty`, `TestXmlEscape_AllSpecialChars`, `TestXmlEscape_NoSpecialChars`, `TestXmlEscape_Mixed`, `TestDefaultICCProfile_NonNil`, `TestDefaultICCProfile_ReturnsCopy`, `TestHasDefaultICC_ReturnsTrue`.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/charts/ ./internal/pdfmeta/` -> ok (both)
+- `go test -count=1 -race ./internal/charts/ ./internal/pdfmeta/` -> ok (both)
+- `go test ./internal/...` -> ALL PASS (28 packages, 1 no-test-files)
+- `make license-check` -> 279/279 compliant
+- `git diff --check && git diff --cached --check` -> clean
+
+## Follow-up - 2026-06-09 agile/dora and calendar coverage
+
+- Surveyed coverage across all packages. Two pure-logic targets identified: `agile/dora.go` (`formatHours` at 41.7%, `ComputeDORA` zero-now branch at 97.1%) and `calendar/calendar.go` (`For` at 54.5%: 5 untested country switch cases; `WorkdaysFrom` at 80%: negative-days path uncovered).
+- Added 2 tests to `internal/agile/dora_test.go` (file now 14 functions): `TestFormatHours` (table test, 6 cases covering `≤0`, `<1h→min`, `<48h→h`, `<30d→d`, `≥30d→wk`) and `TestComputeDORAZeroNowFallsBack` (covers the `if now.IsZero()` guard). All `dora.go` functions now 100%.
+- Added 2 tests to `internal/calendar/calendar_test.go` (file now 7 functions): `TestFor_AllSupportedCountries` (table test over GB, UK, CA, DE, FR, AU — each verified non-nil, correct CountryCode, Christmas 2026-12-25 is a holiday) and `TestWorkdaysFrom_BackwardWalk` (negative days: one workday before Monday 2026-01-05 = Friday 2026-01-02). Calendar coverage: 78.1% → 100%.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/agile/ ./internal/calendar/` -> ok (both)
+- `go test -count=1 -race ./internal/agile/ ./internal/calendar/` -> ok (both)
+- `go test ./internal/...` -> ALL PASS (28 packages, 1 no-test-files)
+- `make license-check` -> 279/279 compliant
+- `git diff --check && git diff --cached --check` -> clean
+
+## Follow-up - 2026-06-09 update + auth package tests
+
+- Identified `internal/update` (isNewer/splitVer/atoi at 0%; VerifyManifest at 0%) and `internal/auth` (NeedsRehash at 0%; VerifyPassword missing several error branches; HashPassword missing empty-password path) as the next pure-logic coverage targets using the glue-vs-logic discriminator.
+- Added 23 new tests to `internal/update/check_test.go` (file now 25 total): `VerifyManifest` 7 tests (happy path, wrong key, bad public key length, invalid manifest JSON, bad payload base64, bad signature base64, invalid payload JSON after successful signature verification); `isNewer` 7 tests; `splitVer` 4 tests; `atoi` 5 tests. `VerifyManifest` now 100%, `isNewer`/`splitVer`/`atoi` all 100%.
+- Added 18 new tests to `internal/auth/password_test.go` (file now 21 total): `HashPasswordRejectsEmptyPassword`, 8 `VerifyPassword` error-branch tests (wrong part count, wrong algorithm, bad version scan, wrong version, bad param scan, bad salt base64, zero memory, zero time), 8 `NeedsRehash` tests (malformed, wrong algorithm, bad param format, weaker memory/time/threads, current params, stronger params), `TestHashVerifyPassword_RoundTrip` (single argon2 call covering HashPassword + VerifyPassword correct + ErrMismatch). `HashPassword` 100%, `NeedsRehash` 100%, `VerifyPassword` 96.4%.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/update/ ./internal/auth/` -> ok (both)
+- `go test -count=1 -race ./internal/update/ ./internal/auth/` -> ok (both)
+- `go test ./internal/...` -> all internal packages pass race-clean; `cmd/pmforge` not tested (requires built `frontend/dist`)
+- `make license-check` -> 279/279 compliant
+- `git diff --check && git diff --cached --check` -> clean
+
+## Follow-up - 2026-06-09 sigma/stats capability bands and timeline parseDate
+
+- Surveyed function-level coverage. Two pure-logic gaps: `sigma/stats/basic.go` `CalculateCapability` at 76.9% (only the top DPMO band was tested) and `timeline/timeline.go` `parseDate` at 66.7% plus the `Build` failed-deployment branch.
+- Rewrote `TestCalculateCapability_DPMOBands` into a 6-row table covering every DPMO band. Drives sigma level deterministically via the dataset `{-1, 1}` (sample StdDev exactly √2) with centered spec `USL=√2*k, LSL=-√2*k`, giving `sigmaLevel = k + 1.5`. `CalculateCapability` now 100%.
+- Added `TestBuildFailedDeploymentTitle` (covers the `!d.Successful` -> "(failed)" branch in `Build`) and `TestParseDate` (direct table: empty, ISO date, RFC3339, RFC3339Nano, garbage). `Build` now 100%; `parseDate` 88.9% (the RFC3339 fallback at 137-139 is unreachable: RFC3339Nano is a superset, left as defensive code).
+- Coverage: sigma/stats 86.0% -> 100%; timeline 86.7% -> 96.7%.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/sigma/stats/ ./internal/timeline/` -> ok (both)
+- `go test -count=1 -race ./internal/sigma/stats/ ./internal/timeline/` -> ok (both)
+- `go test ./internal/...` -> ALL PASS (no failures)
+- `make license-check` -> 279/279 compliant
+- `git diff --check && git diff --cached --check` -> clean
