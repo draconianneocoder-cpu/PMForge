@@ -252,3 +252,18 @@ Verification evidence:
 - `go vet ./internal/charts/ ./internal/documents/` -> clean
 - `go test ./internal/...` -> ALL PASS (no failures)
 - `git diff --check` -> clean
+
+## Follow-up - 2026-06-09 pdfrender error-sentinel robustness
+
+- Broad TODO/FIXME scan across all tracked files (frontend, scripts, Go) confirmed no actionable feature TODO remains; README's open items stay non-code. The scan did surface a real latent bug: `internal/charts/pdfrender/dispatcher.go` `isEngineNotImpl` matched the charts not-implemented error by string literal (`err.Error() == "charts: engine renderer not yet implemented"`).
+- Replaced the string compare with `errors.Is(err, charts.ErrEngineNotImplemented)` (pdfrender already imports charts). The old form silently breaks if the message text drifts and does not unwrap, so a wrapped sentinel would be treated as a hard render failure instead of a skip.
+- Added `TestIsEngineNotImpl` to `pdfrender_test.go`: nil/sentinel/wrapped-sentinel/unrelated cases. The wrapped-sentinel row is the behavior the fix buys and would fail against the old string compare.
+
+Verification evidence:
+
+- `go vet ./internal/charts/pdfrender/` -> clean
+- `go test -count=1 ./internal/charts/pdfrender/` -> ok
+- `go test -count=1 -race ./internal/charts/pdfrender/` -> ok
+- `go test ./internal/...` -> ALL PASS (no failures)
+- `make license-check` -> 279/279 compliant
+- `git diff --check` -> clean
