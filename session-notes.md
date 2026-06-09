@@ -209,3 +209,17 @@ Verification evidence:
 - `go test ./internal/...` -> ALL PASS (no failures)
 - `make license-check` -> 279/279 compliant
 - `git diff --check && git diff --cached --check` -> clean
+
+## Follow-up - 2026-06-09 charts/dag encoders and layout wrappers
+
+- `charts/dag` was the laggard pure-logic engine at 83.7% (siblings flow/stats/matrix at 94-96%). Function-level survey found the gaps: four `Encode*` functions at 0%, the `Layout{CPM,Network,PERT}` wrappers at 0% in-package (they are exercised only via the `charts` dispatcher, and per-package coverage ignores cross-package callers), `NewLayeredNode` at 0%, and the `walk` nil guard.
+- Added 12 tests to `internal/charts/dag/dag_test.go`: four Encode round-trips (`Parse(Encode(doc))`, which also close the matching Parse success paths), `NewLayeredNode`, `LayoutNetwork` (chain + cycle), `LayoutPERT` (fills Expected/Duration, asserts on the in-place-mutated node slice), `LayoutCPM` (linear chain marks every node critical + cycle), and `walk(nil)`.
+- Coverage: charts/dag 83.7% -> 94.5%. Remaining gaps are the `json.Marshal` error guards in `Encode*` (unreachable for these plain structs, capped at 75%) and pre-existing layout-branch partials outside this task's 0%-function scope.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/charts/dag/` -> ok (coverage 94.5%)
+- `go test -count=1 -race ./internal/charts/dag/` -> ok
+- `go test ./internal/...` -> ALL PASS (no failures)
+- `make license-check` -> 279/279 compliant
+- `git diff --check` -> clean
