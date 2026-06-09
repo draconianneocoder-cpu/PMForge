@@ -290,3 +290,18 @@ Verification evidence:
 - Live preview (npm run dev + browser): `#app` mounts [login + ToastContainer]; focus-visible rule loaded with `rgb(0,212,255) solid 2px`; `color-scheme: dark`; html bg `rgb(2,6,23)`; reduced-motion media rule present; username autofocused
 - `make license-check` -> compliant (launch.json annotated in REUSE.toml)
 - Note: `go build ./cmd/...` reports the pre-existing `all:frontend/dist` embed-path condition (present since session start; the Wails/make build handles dist placement), unrelated to these changes.
+
+## Follow-up - 2026-06-09 frontend runtime smoke gate
+
+- Implemented the runtime smoke-check recommended after the toast-rune mount bug (which svelte-check + vite build both passed). Goal: fail the release if the app would not mount.
+- `frontend/scripts/smoke-mount.mjs`: starts a Vite dev server (middleware mode), `ssrLoadModule('/src/App.svelte')` to execute the whole synchronous module graph through the real Svelte compiler, then SSR-renders App via `svelte/server`. Any load-time or synchronous render throw fails. Zero new dependencies (reuses Vite); no jsdom/Playwright/vitest, matching the project's minimal-dep ethos.
+- SSR is the right mode: onMount (window.go) and $effect (dynamic route imports) are skipped, so the foundation loads in Node without the Wails backend. Targets App.svelte, not main.ts (main.ts calls mount() against document at top level -> would false-positive).
+- Wiring: `scripts/frontend-smoke-check.sh` (bash wrapper), `make frontend-smoke`, and `check-release.sh` step 4b after the stability gate. Both new files carry SPDX headers.
+- Proved it catches the bug end-to-end: injected a plain `.ts` using `$state` into App's graph -> `make frontend-smoke` exits 1 ("the app failed to load or render ... #app would not mount"); restored via git checkout -> exits 0. The throw message differs by context (`rune_outside_svelte` in browser vs `$state is not defined` under Node SSR); the gate keys off any throw.
+
+Verification evidence:
+
+- `make frontend-smoke` -> "App loaded and rendered (482 bytes of HTML)", exit 0
+- broken-graph probe -> gate exit 1 (then restored, exit 0)
+- `bash -n scripts/frontend-smoke-check.sh scripts/check-release.sh` -> syntax ok
+- `make license-check` -> compliant
