@@ -267,3 +267,26 @@ Verification evidence:
 - `go test ./internal/...` -> ALL PASS (no failures)
 - `make license-check` -> 279/279 compliant
 - `git diff --check` -> clean
+
+## Follow-up - 2026-06-09 frontend UI/UX: critical mount fix + global polish
+
+- Task: ensure frontend UI/UX operability, elegance, polish. Established baseline (svelte-check 0 errors/203 files, vite build clean), then actually LAUNCHED the app via the preview tool. Discovered the app did not mount at all (`#app` empty, `childCount: 0`).
+- ROOT CAUSE (critical): `src/lib/toast.ts` used the `$state` rune in a plain `.ts` file. Svelte 5 only compiles runes in `.svelte`/`.svelte.js`/`.svelte.ts`; in a plain `.ts`, `$state` throws `rune_outside_svelte` at module load. App -> ToastContainer -> toast import crashed the whole mount. svelte-check passed (ambient rune types) and vite build passed (esbuild bundles the call) - the break is runtime-only, invisible to the release gates which never launch the UI.
+- FIX: renamed `toast.ts` -> `toast.svelte.ts` (git mv) and updated all 12 importers across 11 files to `'../toast.svelte'` / `'../../toast.svelte'` (matching the `session.svelte.ts` -> `'session.svelte'` convention). After the fix the app mounts: `#app` children = [login form, ToastContainer]; verified live.
+- POLISH (all global, in app.css / index.html, so every screen benefits without per-component edits):
+  - Keyboard focus ring: 40 files used `outline-none` (transparent outline) and 0 used focus-visible; added an unlayered `:focus-visible` rule (outranks the layered `.outline-none` utility) with a 2px accent ring scoped to interactive elements.
+  - `prefers-reduced-motion` media block neutralises animation/transition durations app-wide.
+  - `color-scheme: dark` + `accent-color` on `:root` (native scrollbars/checkboxes/date pickers render dark + on-brand).
+  - `-webkit-font-smoothing: antialiased` for crisper text.
+  - index.html: inline `background-color:#020617` on `<html>` + `<meta name=color-scheme content=dark>` to kill the flash-of-white on cold start.
+  - App.svelte route loader: replaced bare "Loading view..." with a spinner + retained "Loading" text label (so reduced-motion users keep the signal).
+  - Login.svelte: autofocus the username field on mount (verified activeElement = username input).
+- Committed `.claude/launch.json` (frontend dev server config for the preview tool) with a REUSE.toml annotation (JSON cannot carry an inline SPDX header).
+
+Verification evidence:
+
+- `npm run check` (svelte-check) -> 203 files, 0 errors, 0 warnings
+- `npm run build` (vite) -> clean
+- Live preview (npm run dev + browser): `#app` mounts [login + ToastContainer]; focus-visible rule loaded with `rgb(0,212,255) solid 2px`; `color-scheme: dark`; html bg `rgb(2,6,23)`; reduced-motion media rule present; username autofocused
+- `make license-check` -> compliant (launch.json annotated in REUSE.toml)
+- Note: `go build ./cmd/...` reports the pre-existing `all:frontend/dist` embed-path condition (present since session start; the Wails/make build handles dist placement), unrelated to these changes.
