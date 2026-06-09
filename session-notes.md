@@ -223,3 +223,18 @@ Verification evidence:
 - `go test ./internal/...` -> ALL PASS (no failures)
 - `make license-check` -> 279/279 compliant
 - `git diff --check` -> clean
+
+## Follow-up - 2026-06-09 documents pure helpers
+
+- `internal/documents` is ~95% gofpdf rendering glue, but the renderers are fed by a seam of pure transforms that were untested. Identified nine: `normaliseExecutionTasks`, `sumExecutionCost`, `computeProjectWindow`, `parseDate` (execution_plan.go), `partitionIssues`/`isIssueResolved`/`issueSeverityOrder` (issue_log.go), `procurementTotal`, `budgetSubtotal`.
+- Added `internal/documents/helpers_test.go` (new file, SPDX header) with focused tests: parseDate formats, computeProjectWindow (empty/inclusive-Days/multi-task/start-only-extends-window), the three cost aggregations, isIssueResolved (trim+case-fold), issueSeverityOrder (each + default), partitionIssues (split + severity sort order), and one representative accessor default-branch test (`TestNormaliseExecutionTasks_DefaultsOnBadInput`) standing in for the ~20 near-identical normalise/getStringX/getFloatX copies.
+- All nine targeted helpers now 100%. Package coverage 39.3% -> 40.5% (small delta expected: gofpdf glue dominates the statement count and is intentionally untested).
+- Note: this empties the pure-logic well. Remaining low-coverage packages (cli, export, charts/pdfrender, sigma/service, db) are predominantly glue already rejected by the discriminator; a future survey may legitimately find no target.
+
+Verification evidence:
+
+- `go test -count=1 ./internal/documents/` -> ok (coverage 40.5%)
+- `go test -count=1 -race ./internal/documents/` -> ok
+- `go test ./internal/...` -> ALL PASS (no failures)
+- `make license-check` -> 279/279 compliant
+- `git diff --check` -> clean
