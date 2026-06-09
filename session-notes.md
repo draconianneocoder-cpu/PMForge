@@ -238,3 +238,17 @@ Verification evidence:
 - `go test ./internal/...` -> ALL PASS (no failures)
 - `make license-check` -> 279/279 compliant
 - `git diff --check` -> clean
+
+## Follow-up - 2026-06-09 stale-doc TODO cleanup
+
+- Pure-logic coverage well is dry (per prior follow-up). Re-read the task as "complete the TODO list": grepped TODO/FIXME/"this v1"/"follow-up"/"not yet" across internal+cmd and cross-checked against README's "Real TODOs in the V2 scaffold" list. README's open items are all non-code (PDF/A-3 soak, PAdES Acrobat validation, SQLCipher V3-deferred). The actionable items were two stale comments contradicting shipped code:
+  - `internal/documents/report.go`: comment claimed charts were "referenced only by ID in this V1" with raster embedding "a follow-up". The code already embeds each chart_ref as a vector visualisation via `pdfrender.RenderChartToPDF` (matches README TODO #12 Done). Rewrote the comment.
+  - `internal/charts/engines.go`: comment claimed "Stats / Matrix / Flow families return ErrEngineNotImplemented" and "DAG fully implemented in V2.1". All 20 kinds have switch arms. Rewrote to list all four families implemented; clarified that `ErrEngineNotImplemented` is the defensive default for an unregistered-renderer kind (still live: returned at the switch default and handled non-fatally in main.go), not dead code.
+- Comment-only changes, no behavior change. README needs no edit: its TODO list already marks #9 and #12 done.
+
+Verification evidence:
+
+- `go build ./internal/...` -> ok
+- `go vet ./internal/charts/ ./internal/documents/` -> clean
+- `go test ./internal/...` -> ALL PASS (no failures)
+- `git diff --check` -> clean
