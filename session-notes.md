@@ -586,3 +586,13 @@ Verification evidence:
   - root project documentation and handoff notes.
 - Staged the complete product/docs/handoff set so the index now represents the verified work. The only intentionally unstaged file is `.claude/settings.local.json`, which is local tool configuration.
 - Staged index hygiene passed with `git diff --cached --check`; full worktree diff hygiene passed with `git diff --check`.
+
+## 2026-06-14 - Post-commit remaining-work audit
+
+- Committed the broad verified work as `b291b5c Complete scheduling and encryption release work`.
+- Remaining current work identified:
+  - External PAdES/Acrobat validation with a trusted signing source remains a real release-hardening item.
+  - Version string `1.1.0-V1-Expansion` is a release decision; if changed, update `wails.json` and `internal/cli/parser.go` together because `check-release` compares them.
+  - ADR-001 Windows packaging validation remains deferred until a Windows target exists.
+  - `.claude/settings.local.json` remains local-only and unstaged.
+- Completed the safest next item: corrected README's PDF/A-3 TODO text so it no longer says PDF/A still needs release-builder soak before becoming a hard release claim. `make check-pdfa` is already a hard gate in `make check-release`.
