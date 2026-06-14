@@ -305,3 +305,284 @@ Verification evidence:
 - broken-graph probe -> gate exit 1 (then restored, exit 0)
 - `bash -n scripts/frontend-smoke-check.sh scripts/check-release.sh` -> syntax ok
 - `make license-check` -> compliant
+
+## 2026-06-10 — Scheduling core roadmap + calendar-anchored CPM (roadmap step 1)
+
+- Added the **Scheduling core roadmap (V3)** to README "Real TODOs" (items 14–20) and AGENT.md §8, in dependency order: date anchoring, dependency types + lag, constraints, progress/baselines, EVM, resource layer, MSPDI import + first-class Gantt. PMForge stays local-first; no cloud features on the roadmap.
+- **Doc-accuracy fix:** README intro and the kernel package comment claimed EVM as implemented scheduling math; no PV/EV/AC/SPI/CPI computation exists. Both now state EVM is roadmap item 18. Rule recorded in AGENT.md: docs must not claim EVM until item 18 ships.
+- **Implemented roadmap item 14, step 1 — `kernel.AnchorSchedule`** (`internal/kernel/anchor.go`): maps CPM day-offsets onto real calendar dates from the project start date, skipping non-working days via an injected `WorkdayFunc` (kernel stays pure; `internal/calendar.Calendar.IsWorkday` is the production predicate). Offset 0 = first workday on/after project start; finish = last occupied day; milestones start/finish same day; defensive 366-day cap prevents pathological calendars from hanging. New `Task.StartDate`/`Task.FinishDate` (YYYY-MM-DD, omitempty) + mirrored optional fields on `KernelTask` in `wails-window.d.ts`.
+- **MSPDI export upgraded** (`internal/export/mspdi.go`): emits anchored dates (T08:00:00 start / T17:00:00 finish) when present, falling back to the legacy offset-from-today epoch for un-anchored maps; tasks now emitted in deterministic (ES, ID) order for reproducible archives.
+- **Wired in `cmd/pmforge/main.go`:** `exportScheduleReportAs` calls new `anchorScheduleToProject` (project start date + country calendar) after `CalculateCPM`; `parseProjectDate` accepts YYYY-MM-DD and RFC3339. Remaining for item 14: thread anchored dates into the CPM chart editor and Timeline/Gantt views.
+
+Verification evidence:
+
+- `go vet ./internal/kernel ./internal/export` -> clean
+- `go test ./internal/kernel ./internal/export` and same with `-race` -> ok (new: 6 AnchorSchedule tests incl. weekend skip, weekend-start roll-forward, milestone, nil calendar, pathological-calendar termination; 3 MSPDI tests incl. anchored dates and determinism)
+- `go build ./cmd/...` -> compiles (dist copied per Makefile convention, then cleaned up)
+
+## Follow-up - 2026-06-10 roadmap item 14 completed (anchored dates in the CPM editor)
+
+- **`charts.LayoutWithSchedule(kind, raw, projectStart, isWorkday)`** (engines.go): CPM-only anchored layout entry point. Non-CPM kinds and a zero projectStart delegate to plain `Layout`, so existing callers and behaviour are untouched. New `dag.AnchorCPMDates(&doc, start, isWorkday)` rebuilds the kernel task map from the annotated doc and copies StartDate/FinishDate back to nodes; `dag.LayeredNode` gains `start_date`/`finish_date` (omitempty).
+- **`App.LayoutChart`** now resolves the open project's start date + country calendar and calls `LayoutWithSchedule`; projects without a start date keep the plain day-offset layout.
+- **`CPMEditor.svelte`**: canvas node's cyan ES/EF row shows `start → finish` real dates when anchored (offsets remain in the detail panel); detail panel gains Start date / Finish date rows; helper text documents that dates appear once Project Settings has a start date. `LayeredNode` TS interface in the shell + `KernelTask` d.ts extended with the optional fields.
+- README roadmap item 14 marked done; the date-axis Gantt strip is deliberately deferred to item 20 (first-class Gantt chart kind). AGENT.md tracker updated to match.
+- Style note: gofmt 1.26 wants comment-block/struct-alignment reflows in several pre-existing files (dag_test.go, fishbone.go, registry.go, odt.go, ...). Left untouched to avoid diff churn; only new/modified hunks are formatted.
+
+Verification evidence:
+
+- `go vet ./internal/charts/... ./internal/kernel` -> clean
+- `go test -race ./internal/charts/... ./internal/kernel ./internal/export` -> ok (new: 2 AnchorCPMDates tests, 3 LayoutWithSchedule tests incl. non-CPM byte-identical delegation)
+- `go build ./cmd/...` -> compiles (dist staged then cleaned; root binary not kept)
+- `npm run check` -> 0 errors, 0 warnings; `make frontend-smoke` -> App loaded and rendered, exit 0
+
+## Follow-up - 2026-06-10 roadmap item 15 (dependency types FS/SS/FF/SF + lag)
+
+- **`kernel.Link` / `kernel.LinkType`** (scheduler.go): typed PDM links with lag (negative = lead). `Task.Links` added alongside legacy `Precedents` (FS+0); a typed Link for the same predecessor wins (`effectiveLinks`). Unknown types normalise to FS.
+- **PDM passes**: forward candidates FS: pEF+lag, SS: pES+lag, FF: pEF+lag-dur, SF: pES+lag-dur, ES clamped >= 0 (leads cannot schedule before project start). Backward: every task's LF starts at projectEF and successor candidates only tighten it -- required because SS successors do not constrain a predecessor's finish and FS leads can produce candidates beyond project finish (caught by TestCPM_StartToStart during development; the old terminal-only projectEF default was insufficient). topoSort builds edges from effectiveLinks.
+- **`dag.ParseLinkLabel`** (cpm.go): "FS", "SS+2", "ff - 1.5", "+3" -> (type, lag); free text / malformed labels fail soft to FS+0 so annotation labels never break scheduling. `LayoutCPM` now feeds typed links to the kernel; `cpmChartDataToKernelTasks` in main.go carries edge labels so schedule-report and MSPDI exports honour them (new import: pmforge/internal/charts/dag).
+- **Layered shell UI**: "Incoming links" section in the detail panel -- every edge into the selected node gets a label input (placeholder FS); CPM editors additionally show the link-grammar hint. Generic across Network/PERT/CPM since labels already exist in the data model.
+- README roadmap item 15 + AGENT.md tracker marked done; CPMEditor helper text documents the grammar.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/charts/... ./internal/export` -> ok (new: 10 kernel PDM tests incl. all four link types, lead clamping, typed-link-wins, link cycles, mixed-link backward pass; 2 dag tests for label parsing + LayoutCPM honouring SS+1)
+- `go vet` clean; `go build ./cmd/...` -> compiles (dist staged then cleaned)
+- `npm run check` -> 0 errors, 0 warnings; `make frontend-smoke` -> App loaded and rendered, exit 0
+
+## Follow-up - 2026-06-10 roadmap item 16 (task constraints with violation surfacing)
+
+- **`kernel.ConstraintType`** (scheduler.go): ASAP (default/empty), ALAP, SNET, FNLT, MFO. Task gains Constraint, ConstraintDate, ConstraintDay/ConstraintArmed (set by arming), ConstraintViolated (computed).
+- **`kernel.ApplyConstraintDates`** + **`kernel.DayOffset`** (anchor.go): DayOffset is the inverse of AnchorSchedule's mapping (date -> working-day index; pre-start clamps to 0; non-workdays map to the next workday; 100k-day walk cap). Finish constraints store day+1 because EF is exclusive (finishOffset = ceil(EF)-1). Date constraints require a project start date; un-anchored schedules leave them dormant. ALAP needs no date.
+- **Pass semantics** (links always win): SNET lifts ES in the forward pass; MFO pulls ES to date-dur or flags violation when links force past the pin; backward pass pins LF to MFO date (flagging if successors need it earlier) and caps LF at FNLT (flagging when EF overruns). FNLT/MFO squeezes produce negative float; **IsCritical changed from |Float|<eps to Float < eps** so super-critical tasks read as critical. ALAP post-pass moves a task to its late dates (ES=LS, EF=LF, Float=0) after both passes so no other task shifts.
+- **dag** (cpm.go): LayoutCPM refactored into cpmTasksFromDoc + copyCPMResults; new **`LayoutCPMScheduled(doc, start, isWorkday)`** = arm constraints -> CPM -> AnchorSchedule -> copy-back (incl. ConstraintViolated). LayeredNode gains constraint/constraint_date (input) + constraint_violated (computed). `charts.LayoutWithSchedule` now calls LayoutCPMScheduled (AnchorCPMDates kept as public API).
+- **main.go**: anchorScheduleToProject replaced by **`scheduleProjectTasks`** (arm -> CPM -> anchor; plain CPM when no start date); cpmChartDataToKernelTasks parses node constraint fields.
+- **CPMEditor.svelte**: constraint dropdown (ASAP/ALAP/SNET/FNLT/MFO), date picker for the date-bearing kinds, amber violation explainer panel, amber dashed outline + "!" canvas marker; helper text documents the rules. Shell LayeredNode TS interface extended.
+- README roadmap item 16 + AGENT.md tracker marked done.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/charts/... ./internal/export` -> ok (new: 9 kernel constraint tests incl. DayOffset table, SNET delay + anchored date, MFO pull/violation, FNLT quiet/violation + negative float criticality, ALAP float consumption, unarmed/bad-date no-ops; 2 dag tests for LayoutCPMScheduled honouring case-insensitive constraints and plain-path ignoring them)
+- One test expectation corrected during development (single-task FNLT: float is bounded by projectEF, not the constraint cap - rewrote with a parallel driver task)
+- `go build ./cmd/...` -> compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders, exit 0
+- gofmt: only pre-existing deviations remain (engines.go comment block etc.), untouched per style-preservation note above
+
+## Follow-up - 2026-06-10 roadmap item 17 (progress, milestones, baseline snapshots)
+
+- **Kernel** (scheduler.go, baseline.go): Task gains PercentComplete (clamped 0-100 inside CalculateCPM; reporting-only, never moves dates), Milestone flag, ActualStart/ActualFinish (DateLayout; consumed by EVM in item 18 - no entry UI yet). New `kernel.CompareSchedules(current, baseline)` -> map[taskID]ScheduleVariance with start/finish variance in working days (positive = slip) and the baseline's anchored dates; tasks present in only one map are skipped.
+- **DB** (sqlite.go, baselines.go): new `baselines` table (FK to project + charts with CASCADE; indexed by chart). Rows are immutable snapshots: SaveBaseline (insert-only), GetBaseline, ListBaselines (newest first), DeleteBaseline. Additive CREATE TABLE IF NOT EXISTS keeps the V1->V2 migration story intact.
+- **Wails surface** (main.go §Schedule baselines): SetScheduleBaseline snapshots the chart's FULLY scheduled task map (constraints armed -> CPM -> anchored) as JSON; ListScheduleBaselines; DeleteScheduleBaseline; CompareScheduleBaseline (latest when baselineID empty, returns {} when none) re-schedules current chart data and diffs via kernel.CompareSchedules.
+- **dag**: LayeredNode gains percent_complete/milestone (inputs persisted in chart JSON); cpmTasksFromDoc passes them to the kernel so exports see progress.
+- **Shell**: new optional `toolbarExtra` snippet prop rendered before + Node (generic; CPM uses it for Set baseline).
+- **CPMEditor**: Set baseline / Re-baseline (n) toolbar button with transient status; % Complete input + Milestone checkbox; canvas progress strip (cyan, bottom edge) + cyan diamond milestone marker; baseline variance block in detail panel (baseline dates, start/finish vs baseline, red late / green early / slate on-plan). Baseline fetches fail soft - the editor never blocks on them.
+- d.ts: BaselineRecord, ScheduleVariance, 4 App methods, KernelTask progress/constraint fields.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/db ./internal/charts/... ./internal/export` -> ok (new: CompareSchedules slip/new-task/baseline-dates tests, progress clamping test, baselines CRUD test with FK fixture - first attempt failed FOREIGN KEY until the fixture created real project/chart rows - and newest-first ordering + empty-chart cases)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders
+- gofmt clean on all touched files (settings_test.go flag is pre-existing)
+
+## Follow-up - 2026-06-10 roadmap item 18 (Earned Value Management)
+
+- **`kernel.ComputeEVM`** (evm.go): per-task PV = BudgetedCost x planned fraction at the status day (linear across ES..EF; zero-duration milestones earn fully at ES), EV = BudgetedCost x PercentComplete/100, AC = ActualCost. Totals + SV/CV, SPI/CPI (0 = "n/a" when denominator 0), EAC = BAC/CPI (BAC fallback), ETC, VAC. Per-task breakdown sorted by ID for determinism. Task gains BudgetedCost/ActualCost (scheduler.go).
+- **Status-date mapping**: `App.ComputeScheduleEVM(chartID, asOfDate)` ("" = today) re-schedules the chart's tasks, maps the date through `kernel.DayOffset` with the project country calendar, and **errors without a project start date** rather than emit offset-less numbers.
+- **Threading**: dag LayeredNode + cpmTasksFromDoc and main.go's cpmChartDataToKernelTasks now carry percent/milestone/actuals/costs, so the export path sees them too (engine.go ReportPayload comment updated to point at ComputeEVM for future report sections).
+- **UI**: CPMEditor detail panel gains Budgeted/Actual cost and Actual start/finish inputs (the actual-date UI deferred from item 17). New `asideExtra` shell snippet hosts the chart-level "Earned value" card: status-date picker + Compute button, BAC/PV/EV/AC grid, SV/CV/SPI/CPI with red/green semantics, EAC/ETC/VAC, and a plain-language footnote. d.ts: EVMetrics/TaskEV + method + node cost fields.
+- **Doc-accuracy claims closed**: kernel package comment now lists EVM as implemented (the rule "docs must not claim EVM until item 18" is retired); README intro re-expanded to include EVM/baselines/constraints; README item 18 + AGENT.md tracker marked done. Optional follow-up noted: EVM sections in the Status Report renderer / combined report builder.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/charts/... ./internal/export ./internal/db` -> ok (new: 5 EVM tests - textbook totals incl. SPI 0.75 / CPI 0.6 / EAC = BAC/CPI, mid-task linear PV, zero-denominator conventions, milestone PV step, deterministic per-task order)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors (after adding asideExtra to the shell's props destructure - svelte-check caught the omission); `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 roadmap item 19 slice 1 (kernel resource core)
+
+- **`internal/kernel/resources.go`**: Assignment {resource, units} on Task (units <= 0 normalise to 1.0); Task.Overallocated computed flag.
+- **`ResourceUsage(tasks)`**: per-resource per-day demand profiles (shared horizon = last occupied day + 1; integer-day spans via the AnchorSchedule convention: round(ES) .. ceil(EF)-1; zero-duration tasks occupy nothing).
+- **`DetectOverallocations(tasks, capacities)`**: capacity map (missing = 1.0), breaches sorted by (resource, day) with offender task IDs sorted; clears then sets Task.Overallocated so repeated runs are idempotent.
+- **`LevelResources(tasks, capacities)`**: serial method - internal CalculateCPM (cycle -> false), ready queue picks least (LS, ID), precedence-earliest start recomputed against LEVELLED predecessors with the full FS/SS/FF/SF + lag candidate formulas, never earlier than the constrained ES, then pushed day-by-day (10k-day horizon) until every assignment fits booked capacity. Impossible demand (units > capacity) stays at its earliest start and remains visible to DetectOverallocations rather than being shoved to the horizon. Documented simplifications: integer-day booking; post-leveling LS/LF/Float still describe the precedence-only schedule.
+- README item 19 marked "kernel core landed, UI remaining"; AGENT.md tracker matches. Remaining slices: assignment UI wired to stakeholders, resource histogram chart kind, Level-resources action, per-resource calendars.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/charts/... ./internal/export ./internal/db` -> ok (new: 10 resource tests - usage profile, overallocation detection + capacity + flag idempotence, leveling serialisation, least-float priority, links+lag after leveling, fractional-unit sharing, impossible demand, cycle, unassigned tasks)
+- `go vet` clean; `go build ./cmd/...` compiles; gofmt clean on new files
+
+## Follow-up - 2026-06-10 roadmap item 19 slice 2 (assignment UI + overallocation surfacing)
+
+- **dag**: LayeredNode gains `assignments` ([]kernel.Assignment, input) + `overallocated` (computed). Both CPM layout paths (plain + scheduled) run `kernel.DetectOverallocations(tasks, nil)` after CalculateCPM - overallocation needs only offsets, so it works un-anchored. copyCPMResults copies the flag back.
+- **main.go**: cpmChartDataToKernelTasks parses node assignments, so schedule-report/MSPDI/EVM/baseline paths all see resource demand.
+- **CPMEditor**: "Assignments" section in the detail panel - per-row resource input with a stakeholder `<datalist>` (loaded via App.ListStakeholders('') fail-soft; free text always works), units input (1 = full-time), remove button, "+ Assign resource". Overallocated nodes get an orange left-edge strip on the canvas and an explainer panel; helper text documents the capacity-1.0 default.
+- d.ts/shell types: ResourceAssignment, assignments/overallocated on KernelTask + LayeredNode.
+- Remaining for item 19 (slice 3): resource usage/histogram chart kind, Level-resources action (design: persist levelled starts as SNET constraints), per-resource capacities/calendars UI.
+
+Verification evidence:
+
+- `go test -race ./internal/kernel ./internal/charts/... ./internal/export ./internal/db` -> ok (new dag test: LayoutCPM flags parallel same-resource tasks and leaves unassigned nodes clean)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 roadmap item 19 slice 3 (Level action + resource histogram)
+
+- **`App.LevelChartResources(chartID)`** (main.go): baseline precedence-only CPM pass vs a LevelResources pass on a fresh task map; every task levelling delayed gets `constraint=SNET` + `constraint_date=<levelled start>` written into the chart doc and saved. User-set non-SNET constraints are never overridden; stale SNET pins from earlier levelling runs are cleared when no longer needed. Requires a project start date (offsets -> dates). Returns pinned count.
+- **`App.GenerateResourceHistogram(chartID)`**: kernel.ResourceUsage -> Bar chart (categories = real dates when anchored via a synthetic 1-day-task AnchorSchedule trick, else "Day n"; one series per resource, sorted). Snapshot semantics: the bar chart's config carries `{"source_chart_id":...}` so regeneration updates the same chart instead of accumulating copies; being a normal Bar chart it inherits the editor, pdfrender, and combined-report embedding for free (no 21st chart kind needed - decision: reuse beats new render surface).
+- **Shell**: extracted `loadChart()` and exported **`reloadFromDB()`**; CPMEditor binds the shell instance and reloads after levelling so the in-memory doc can't clobber backend-written SNET pins on the next Ctrl+S (hazard caught during design review).
+- **CPMEditor toolbar**: Level + Histogram buttons with transient status messages; d.ts declarations added.
+- README item 19 + AGENT.md tracker updated: remaining = per-resource capacities (stakeholder record) and per-resource calendars.
+
+Verification evidence:
+
+- `go test -race ./cmd/... ./internal/kernel ./internal/charts/dag` -> ok (new cmd tests: levelling pins exactly the delayed task at the right date - B SNET 2026-06-03 behind A from a Monday start; no-start-date error; histogram series/dates/idempotent-regeneration; no-assignments error)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 roadmap item 20 slice 1 (MSPDI import + round-trip export)
+
+- **`export.FromMSPDI`** (mspdi_import.go): parses MSPDI XML into ImportedProject/ImportedTask. Conversions: PT<h>H<m>M<s>S durations -> working days at 8h/day; PredecessorLink Type 0=FF/1=FS(default)/2=SF/3=SS; LinkLag tenths-of-a-minute -> days (4800 = 1 day); Summary=1 and IsNull=1 rows skipped with dangling links to them dropped; assignments flattened to resource NAMES with Units passing through; StartDate reduced to YYYY-MM-DD. Errors on zero importable tasks and malformed XML.
+- **`ToMSPDI` enriched for round-trip**: emits PredecessorLink (via new exported `kernel.EffectiveLinks` merge), Milestone (explicit flag OR zero duration), PercentComplete, and Resources/Assignments (stable name->UID table). Verified by TestMSPDIRoundTrip: export -> import preserves durations, SS+1 lag, FS from legacy Precedents, milestone flag, and 0.5-unit assignment.
+- **`dag.FormatLinkLabel`**: ParseLinkLabel's inverse ("" for plain FS, "SS+1", "FF-1.5") used when materialising imported links as edge labels.
+- **`App.ImportMSPDIChart`** (file dialog) + testable `importMSPDIFromBytes`: builds a CPM chart doc from the import, adopts the file's start date ONLY when the project has none, saves as kind=cpm. Dashboard "New chart" header gains an "Import schedule (MSPDI)" button that routes straight into the CPM editor (cancel is silent; errors show inline).
+- cmd tests prove the full path end-to-end: imported chart -> loader -> scheduleProjectTasks gives Move ES=1 (SS+1) anchored at 2026-07-07 from the adopted Monday 2026-07-06 start; existing project start dates are preserved.
+- README item 20 marked "interchange half done"; .mpp binary import documented as out of scope (MSPDI XML is the interchange format). Remaining: first-class Gantt chart kind.
+
+Verification evidence:
+
+- `go test -race ./cmd/... ./internal/export ./internal/kernel ./internal/charts/dag` -> ok (new: 3 export tests incl. round-trip, 2 cmd tests; one spurious FAIL was the embed-dist staging order in my own test command, not a code defect - re-ran with dist staged, green)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 roadmap item 20 slice 2 (first-class Gantt chart kind) - ROADMAP FEATURES COMPLETE
+
+- **`gantt` is the 21st chart kind**, sharing the layered/CPM data model so every scheduling feature (typed links + lag, constraints, progress, assignments, overallocation, baselines, levelling, histogram, MSPDI import) works on Gantt charts with zero extra plumbing.
+- **dag/gantt.go**: GanttRow/GanttDep/GanttLayout; LayoutGantt (full CPM + DetectOverallocations, rows sorted (ES, ID), horizon = max EF) and LayoutGanttScheduled (+constraints armed, anchored dates, Anchored flag). engines.go: KindGantt arm + LayoutWithSchedule generalised to CPM|Gantt.
+- **pdfrender/gantt.go**: bespoke renderer (label column, day grid via pickGridStep, critical-red bars, progress strip, milestone diamonds, anchored date captions, row cap to frame height) dispatched alongside fishbone's bespoke path; embeds in combined reports.
+- **GanttEditor.svelte**: editable task grid (label/duration/%/milestone, delete), link list + add (from/to selects + FS/SS/FF/SF±lag label), zoomable (8-80 px/day) SVG canvas with day grid, dependency elbow paths, critical colouring, progress overlay, baseline ghost bars (via CompareScheduleBaseline variance back-computation), overallocation outlines, constraint "!" markers, anchored date captions, Set-baseline button, Ctrl+S.
+- Wiring: session view union, App.svelte route, Dashboard card/starter/route. Registry count tests updated 20 -> 21 (All/ByEngine DAG 6 -> 7); README/AGENT.md "20 chart kinds" claims swept to 21 (historical lessons-learned entry left as history; TODO item 9 reworded to note the 21st landed via roadmap item 20).
+- **Scheduling core roadmap items 14-20 are now all functionally complete.** Remaining polish (item 19): per-resource capacities (stakeholder record) + per-resource calendars; optional: EVM sections in Status Report / combined report renderers; V3 hardening per AGENT.md section 8.
+
+Verification evidence:
+
+- `go test -race ./internal/charts/... ./internal/kernel ./internal/export ./cmd/...` -> ok (new: 4 dag gantt tests incl. scheduled dates + cycle + overallocation rows; 3 pdfrender tests incl. empty-chart placeholder and grid-step picker; registry counts)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `npm run build` -> clean; `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 roadmap item 19 polish (stakeholder availability as resource capacity)
+
+- **db**: stakeholders gain `availability REAL NOT NULL DEFAULT 1` (units; 1 = full-time, 0.5 = half-time, 2 = two-person pool). Additive migration via the existing columnSet/ALTER TABLE probe pattern; SaveStakeholder defaults <= 0 to 1; all SELECT/INSERT/scan sites updated.
+- **Threading**: `stakeholderCapacities(d, projectID)` in main.go (name -> availability; fail-soft nil). Consumed by: `App.LayoutChart` -> `charts.LayoutWithSchedule` -> `dag.LayoutCPMScheduled`/`LayoutGanttScheduled` (new `capacities` parameter; plain un-anchored Layout paths keep the 1.0 default since they lack project context) and `App.LevelChartResources` -> `kernel.LevelResources`. Non-stakeholder resource names keep the kernel's 1.0 default.
+- **UI**: Stakeholder manager gains an Availability field with plain-language hint; d.ts Stakeholder interface updated.
+- README item 19 marked complete (per-resource calendars explicitly deferred to V3 with the design reason: resource-specific non-working days interact with the anchoring layer); AGENT.md tracker matches. **All roadmap items 14-20 are now complete.**
+
+Verification evidence:
+
+- `go test -race ./cmd/... ./internal/db ./internal/charts/...` -> ok, plus -count=1 fresh runs of the new tests (capacity-2 stakeholder absorbs the contention fixture -> 0 pins; availability round-trip incl. default-to-1)
+- `go build ./cmd/...` compiles; `npm run check` -> 0 errors; `make frontend-smoke` -> renders
+
+## Follow-up - 2026-06-10 EVM sections in schedule-report exports + orphan cleanup
+
+- **`ReportPayload.EVM *kernel.EVMetrics`** (engine.go) + shared **`evmSummaryLines`** helper (11 label:value lines; nil when metrics are nil OR BAC is 0, so cost-less schedules keep byte-identical reports). PDF (renderPDF), DOCX (renderDocumentDOCX), and ODT (renderODTReportBody) schedule reports append an "Earned Value (status date: today)" section from the same lines.
+- **main.go exportScheduleReportAs**: computes EVM at today's working-day offset (kernel.DayOffset against project start + country calendar) only when the project is anchored. CSV/XLSX/MSPDI formats deliberately unchanged (row-schema stability; MSPDI has no EVM elements in our subset).
+- **Orphan retired**: legacy `frontend/src/lib/components/GanttChart.svelte` (V1 read-only bar component, referenced nowhere since the first-class gantt kind shipped) deleted; svelte-check/build confirm nothing depended on it.
+- README item 18 follow-up note updated: schedule-report EVM landed; Status Report document renderer / combined report EVM remains a possible later enhancement (needs chart_ref resolution design since document renderers see content JSON, not schedule payloads).
+
+Verification evidence:
+
+- `go test -count=1 -race ./internal/export` -> ok (new: evmSummaryLines values incl. SPI 0.75/CPI 0.60, suppression on nil + zero BAC, ODT body contains/omits the section, PDF+DOCX render smoke with EVM)
+- `go test -count=1 ./cmd/...` -> ok; `go build ./cmd/...` compiles
+- `npm run check` -> 0 errors; `npm run build` -> clean; `make frontend-smoke` -> renders (confirms orphan deletion safe)
+
+## 2026-06-11 - Full release gate GREEN on macOS (capstone over the scheduling-core expansion)
+
+James ran `make check-release` on the Mac mini against everything shipped 2026-06-10 (roadmap items 14-20 + EVM report sections + orphan cleanup). All gates passed: version match, REUSE licensing, frontend build budget, release-gate scope, frontend stability, runtime smoke, memory-safety scan, race detector, build, PDF/A-3 validation, PAdES local validation. "PMForge is ready for release."
+
+Observation for the next release decision: the version string is still `1.1.0-V1-Expansion` (wails.json `productVersion` + internal/cli/parser.go `Version`). Given the scheduling-core expansion (typed dependencies, constraints, baselines, EVM, resource layer, MSPDI interchange, Gantt - 7 roadmap items), a bump (e.g. 1.2.0 with a V2-Scheduling tag, or whatever naming James prefers) would better describe the binary. Both sites must change together - check-release's version gate compares them. Left untouched: version bumps are a release decision, not a code fix.
+
+## 2026-06-11 - ADR-001: database encryption at rest (V3 design)
+
+- New `docs/design/ADR-001-database-encryption-at-rest.md` (GFDL header; first file in docs/design/). Proposed decision: SQLCipher page-level encryption for per-user .pmforge databases; system.db deliberately stays plaintext (only Argon2id hashes + wrapped keys; avoids the login bootstrapping problem).
+- Key design point discovered while grounding the doc in code: `ResetWithRecoveryCode` changes the password WITHOUT the old one, so a password-derived key alone would orphan all data on recovery. Hierarchy: random 32-byte DEK -> wrapped by KEK(password) AND by a KEK per active recovery code (reusing the crypto package's Argon2id + AES-256-GCM patterns); password change = re-wrap, recovery reset = unwrap-via-code + re-wrap; all-codes-spent + forgotten password = unrecoverable by design (UI must say so).
+- Options evaluated: A SQLCipher binding (chosen; binding/license/perf explicitly deferred to a Phase 0 spike - no dependency lands before evidence), B whole-file envelope (rejected: plaintext WAL window = the documented crash hazard), C field-level encryption (rejected: plaintext metadata + smeared complexity), D status quo OS FDE (remains the documented baseline + defence in depth).
+- Migration mirrors the proven SwapInSnapshot atomic pattern via sqlcipher_export with integrity_check before and after, .bak retention, no downgrade path (matches V1->V2 stance).
+- README TODO #8 and AGENT.md "Still deferred to V3" now point at the ADR. `release-gate-scope-check.sh` re-run -> still green (the README encryption guidance it guards is intact).
+
+Verification evidence: scope gate green; doc-only change, no code touched.
+
+## 2026-06-12 - ADR-001 Phase 0 spike executed (linux/arm64)
+
+- Spiked `mutecomm/go-sqlcipher/v4 v4.4.2` in an ISOLATED module (sandbox scratch; repo go.mod/go.sum untouched - verified zero diff). Sources + reproduction README stored as `.go.txt` under `docs/design/spike-sqlcipher/` so they never enter the build or module graph; results recorded as Appendix A in ADR-001.
+- **All functional checks PASS** against PMForge's usage profile: encrypted create via raw-keyspec DSN, WAL + foreign keys active, integrity_check ok + cipher_integrity_check 0 failures, wrong-key/keyless opens rejected, file header randomised (IsEncrypted true), plaintext->encrypted migration via ATTACH + sqlcipher_export with matching row counts. Clean 15 s build, no system deps (libtomcrypt bundled, no OpenSSL). Confirmed: the binding registers driver name "sqlite3" -> REPLACES mattn, cannot coexist in one binary (perf baseline needed a second module).
+- **Performance**: insert-5000-rows tx ~6.0-6.1 ms plaintext vs ~15.6-22.6 ms encrypted (~2.6-3.7x write overhead); full scan ~330-343 us vs ~380-410 us (~15-20%); binaries comparable (6.85 vs 6.68 MB). Negligible in absolute terms for PMForge's single-user KB-scale workload.
+- **Principal finding (against adopting v4.4.2 as-is): staleness.** MAINTENANCE pins mattn v1.14.5 / SQLCipher 4.4.2 / libtomcrypt 2020-08-29; bundled engine reports sqlite_version() 3.33.0 (2020) vs 3.45.1 in our current mattn v1.14.22. PMForge's SQL needs nothing newer than 3.33, but an encryption feature on a 2020-frozen crypto stack misses 5+ years of upstream fixes. ADR Appendix A orders next evaluation: (A1) maintained fork tracking current SQLCipher, (A2) mattn -tags libsqlite3 against vendored current SQLCipher, (A3) accept v4.4.2 with documented risk. Key hierarchy/migration design unaffected.
+- Remaining Phase 0: James reproduces on macOS arm64 via docs/design/spike-sqlcipher/README.md (also Windows when CI exists).
+- Sandbox lesson: background processes do not survive between tool calls here; the amalgamation compiles in ~15 s anyway, so foreground builds suffice.
+
+Verification evidence: spike `SPIKE PASS` (3 runs) + baseline `BASELINE PASS` (3 runs); repo go.mod/go.sum diff = 0 lines; release-gate scope check green after docs additions.
+
+## 2026-06-12 - Phase 0 macOS results + fork survey (Phase 0 build evidence COMPLETE for dev platforms)
+
+- James reproduced the spike on the Mac mini (arm64): **SPIKE PASS x3 and BASELINE PASS x3**, functional results identical to linux. Build 9.5 s wall. Perf: insert5000 14.5-20.6 ms encrypted vs 7.7-13.8 ms plaintext (~1.5-1.9x writes); scans within noise (encrypted 349-673 us vs plaintext 439-792 us); binaries 6.70 vs 6.84 MB. Appendix A updated with the macOS table. Windows remains for when a Windows target exists.
+- README paste bug fixed along the way: the spike README used a `<repo>` placeholder that zsh parsed as a redirect; replaced with a literal $REPO variable block (lesson: reproduction docs must be paste-safe, no angle-bracket placeholders).
+- **A1 fork survey**: no fork demonstrably tracks current SQLCipher; grassto/go-sqlcipher only renames the driver to avoid the mattn conflict. Realistic decision is now A2 (mattn -tags libsqlite3 + vendored current SQLCipher; fresh engine, owns packaging) vs A3 (adopt v4.4.2 as-is; proven on both dev platforms, 2020-frozen engine documented as risk, sqlcipher_export as future escape hatch). Recorded in Appendix A; decision is James's.
+
+## 2026-06-12 - ADR-001 ACCEPTED (A3) + bbolt assessment + key hierarchy implemented (step 3)
+
+- **A3 accepted by James**: adopt mutecomm/go-sqlcipher v4.4.2 as-is; 2020-frozen engine documented as known risk, sqlcipher_export as escape hatch. ADR Status -> Accepted with acceptance note. NOTE: the dependency itself still does NOT land until step 5 (db.InitDB keying); go.mod remains untouched.
+- **bbolt question answered (ADR Appendix C): not a value add, rejected.** As main store it loses SQL/FK/indexes/migrations AND has no encryption (recreates the exact problem SQLCipher solves); as a side store for wrapped DEKs it duplicates system.db (which must pre-exist login anyway) and adds a second file format to backups/repair/REUSE for zero capability. Future no-CGO scenario points to a CGO-free SQLite port, not a KV store.
+- **Step 3 implemented (key hierarchy, binding-independent pure Go):**
+  - internal/crypto/keywrap.go: GenerateDEK (32 random bytes), WrapKey/UnwrapKey (base64 over existing Argon2id+AES-256-GCM EncryptBuffer; fresh salt+nonce per wrap), KeyspecHex (64-char uppercase hex for the future PRAGMA raw keyspec). 5 tests.
+  - internal/users/dek.go: probe-guarded ALTERs add users.wrapped_dek_pw + recovery_codes.wrapped_dek; UnlockDEK (login-time unwrap; LAZY DEK creation for pre-ADR accounts at the only moment the verified password is in hand).
+  - recovery.go: IssueRecoveryCodes(username, dek) wraps the session DEK into each code (nil dek = legacy plain codes); ResetWithRecoveryCode unwraps the matched code's wrap and re-wraps the SAME DEK under the new password atomically with the hash rotation; legacy unwrapped codes generate a fresh DEK (safe only pre-encryption; encryption-enable flow must force re-issue).
+  - main.go: App.dek session field (set in Login/CreateAccount via UnlockDEK, zeroed+cleared in Logout); IssueRecoveryCodes passes it. No frontend API changes.
+- Tests: dek_test.go covers lazy generation + stability, wrong-password/unknown-user failure, **the data-survival invariant (reset via code -> identical DEK under new password; old password dead)**, legacy fresh-DEK path, migration idempotence. Existing recovery tests updated for the new signature (nil dek).
+
+Verification evidence:
+
+- `go test -race ./cmd/... ./internal/users ./internal/crypto` -> ok (users 17.8 s - Argon2id cost x many wraps, expected)
+- `go build ./cmd/...` compiles; release-gate scope check green; go.mod/go.sum untouched
+
+## 2026-06-13 - ADR-001 encryption-at-rest implementation docs updated
+
+- Final docs now match the implemented SQLCipher path: new per-user `.pmforge` project databases are SQLCipher-encrypted with the user's DEK; existing plaintext projects can migrate from Project Settings after recovery-code reissue; `system.db` remains plaintext by design and stores password hashes plus wrapped DEKs, not project records.
+- Recovery semantics are explicit in README/ADR/AGENT: active recovery codes wrap the DEK, enabling password reset without orphaning encrypted projects; losing the password and all valid wrapped recovery codes makes encrypted project databases unrecoverable by design.
+- Backup semantics are explicit: `.pmba` archives preserve encrypted `project.pmforge` bytes, so backup files inherit project database encryption.
+- `docs/design/ADR-001-database-encryption-at-rest.md` moved from accepted design/pending steps to implemented status, with steps 4-7 marked complete and Appendix B summarizing SQLCipher open/migration, Settings opt-in, repair/backup/headless handling, and release gates.
+- `AGENT.md` no longer lists per-user database encryption at rest as "implementation not started"; the 2026-06-06 and 2026-06-09 historical notes now say they were superseded by the 2026-06-13 SQLCipher implementation.
+- Remaining encryption-at-rest work from the written plan: Task 7 step 2 full verification.
+
+## 2026-06-13 - ADR-001 encryption-at-rest full verification passed
+
+- The encryption-at-rest implementation and verification tasks are complete through Task 7 step 2. Task 0 step 3 remains intentionally unchecked because it is a staging-only instruction and no staging/commit was requested.
+- Full verification passed:
+  - `npm --prefix frontend run build`
+  - `mkdir -p cmd/pmforge/frontend`
+  - `rm -rf cmd/pmforge/frontend/dist`
+  - `cp -R frontend/dist cmd/pmforge/frontend/dist`
+  - `go test -count=1 ./cmd/... ./internal/...`
+  - `go test -count=1 -race ./internal/crypto ./internal/users ./internal/db`
+  - `make check-encrypted-db`
+  - `make license-check`
+  - `make release-scope`
+  - `make check-release`
+- `make check-release` completed all release gates and ended with `PMForge is ready for release.`
+- Sequencing note: `make license-check` removes `cmd/pmforge/frontend/dist`. Do not run it in parallel with Go compile gates that import `cmd/pmforge`; recreate the embed dist before standalone Go compile gates, or use `make check-release`, which rebuilds/copies the frontend internally.
+
+## 2026-06-14 - Partial key-hierarchy staging boundary
+
+- Removed a stale empty `.git/index.lock` after confirming no active Git index-writing process was running; the only Git process was the fsmonitor daemon and the lock timestamp was June 10.
+- Staged the safe whole-file key-hierarchy slice:
+  - `docs/design/ADR-001-database-encryption-at-rest.md`
+  - `internal/crypto/keywrap.go`
+  - `internal/crypto/keywrap_test.go`
+  - `internal/users/dek.go`
+  - `internal/users/dek_test.go`
+  - `internal/users/recovery.go`
+  - `internal/users/recovery_test.go`
+  - `internal/users/store.go`
+- Left `cmd/pmforge/main.go` and `session-notes.md` unstaged because they contain broad unrelated dirty changes and need deliberate hunk-level staging for only the encryption/session handoff hunks.
+- Staged diff hygiene passed with `git diff --cached --check`.
+
+## 2026-06-14 - Dirty hunk classification completed
+
+- Reclassified the broad dirty tree as coherent verified work rather than unrelated noise:
+  - scheduling/Gantt/resource/MSPDI roadmap completion,
+  - SQLCipher encryption-at-rest completion,
+  - release-gate hardening,
+  - root project documentation and handoff notes.
+- Staged the complete product/docs/handoff set so the index now represents the verified work. The only intentionally unstaged file is `.claude/settings.local.json`, which is local tool configuration.
+- Staged index hygiene passed with `git diff --cached --check`; full worktree diff hygiene passed with `git diff --check`.
