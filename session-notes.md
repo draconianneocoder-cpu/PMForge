@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The PMForge Contributors
+SPDX-FileCopyrightText: 2026 James L. Burns and The PMForge Contributors
 SPDX-License-Identifier: GFDL-1.3-or-later
 -->
 
@@ -596,3 +596,348 @@ Verification evidence:
   - ADR-001 Windows packaging validation remains deferred until a Windows target exists.
   - `.claude/settings.local.json` remains local-only and unstaged.
 - Completed the safest next item: corrected README's PDF/A-3 TODO text so it no longer says PDF/A still needs release-builder soak before becoming a hard release claim. `make check-pdfa` is already a hard gate in `make check-release`.
+
+## 2026-06-14 - Local Apple Silicon installer package
+
+- Added `make package-macos-installer`, backed by `scripts/package-macos-installer.sh`, to build a local Apple Silicon `.pkg` installer for PMForge.
+- The script requires a Darwin/arm64 host, runs the existing production build, assembles a standard `PMForge.app` bundle in `/tmp`, ad-hoc signs it, strips extended attributes/resource-fork sidecars before packaging, and writes `build/packages/PMForge-1.1.0-V1-Expansion-darwin-arm64.pkg`.
+- Verification passed:
+  - `bash -n scripts/package-macos-installer.sh`
+  - `make package-macos-installer`
+  - package expansion in `/tmp`, `codesign --verify --deep --strict --verbose=2` on the payload `PMForge.app`
+  - `plutil -p` on payload `Info.plist`
+  - `file` + `lipo -archs` confirmed the payload executable is `arm64`
+  - payload `pmforge --version` reported `PMForge 1.1.0-V1-Expansion`
+  - `make release-scope`
+  - `go test ./cmd/... ./internal/...`
+- Distribution limitation: the package is intentionally local-test only. `spctl -a -vv -t install build/packages/PMForge-1.1.0-V1-Expansion-darwin-arm64.pkg` reports `rejected` with `source=no usable signature` because there is no Developer ID Installer certificate/notarization in this repo.
+
+## 2026-06-15 - Root-caused installed app "never starts / no GUI" + startup hardening
+
+- Reproduced on James's M4 Mac: the installed `/Applications/PMForge.app` launches then dies in <1s with NO window and NO crash report; Console showed only `appDeath for dev.pmforge.PMForge` and the pmforge process emitted zero os_log lines. `~/Documents/PMForge/system.db` existed and its WAL was touched on the failing launch, proving `NewApp()` succeeded and the failure was after it (in `wails.Run`).
+- **Root cause (confirmed by running the binary directly):** `build/bin/pmforge --` printed `wails: Wails applications will not build without the correct build tags` (exit 1). The `Makefile` `build` target compiled with a plain `go build` and NO Wails build tags, so the binary linked Wails' stub `Run()` that aborts at launch. Both packaging scripts call `make build`, so the `.pkg` inherited the broken binary. Go's `log.Fatalf` writes to stderr, which a Finder/LaunchServices GUI launch discards -> the failure was completely invisible.
+- **Fix 1 (the defect):** added `-tags "desktop,production"` to the `Makefile` `build` target's `go build` line (verified against Wails docs: `wails build` uses exactly these tags). `.gitlab-ci.yml` has the same tag-less `go build` smoke line but is followed by a real `wails build`; left unchanged to avoid guessing the Linux `webkit2_4x` tag from a non-Linux host - flagged as a separate follow-up.
+- **Fix 2 (hardening, requested):** new stdlib-only `internal/applog` package. `Init(preferredDir)` tees the standard logger to stderr AND a dated file `~/Documents/PMForge/logs/pmforge-<date>.log` (XDG-aware; home/temp fallback; never fatal). `Fatal(title,msg,logPath,err)` logs the error with a stack trace, shows a native OS error dialog (osascript / PowerShell MessageBox / zenity-kdialog-notify-send via build-tagged `dialog_*.go`), then exits 1. `cmd/pmforge/main.go` initialises it at the top of the GUI path and routes both fatal branches (NewApp + wails.Run) through `applog.Fatal`; CLI maintenance paths unchanged (stderr stays visible in-terminal).
+- Tests: `internal/applog/applog_test.go` covers dated-file creation, append-across-calls, `resolveLogDir` (preferred + whitespace/empty fallback), and the `formatFatal`/`dialogMessage` content. Native dialogs are best-effort and not unit-tested (side-effecting OS calls).
+- Docs: README gains a "Logs and startup diagnostics" section, a Toolchain build-tags warning, and a first-run-layout mention of `logs/`.
+- **Verification still owed (no Go toolchain in this Cowork sandbox):** James must run on the Mac: `make build && ./build/bin/pmforge` (GUI should open), then `go test ./internal/applog/...`, `go test ./cmd/... ./internal/...`, `make check-release`, and `make package-macos-installer` to reship the fixed `.pkg`.
+
+## 2026-06-15 - Second build break: macOS UTType link failure (fixed)
+
+- After the build-tags fix, `make build` got PAST the stub-Run abort and actually compiled the Wails darwin code (good - proves Fix 1 works). It then failed at LINK on James's Mac (Xcode macOS 15 SDK, Go 1.26.4): `Undefined symbols for architecture arm64: "_OBJC_CLASS_$_UTType" ... ld: symbol(s) not found`. The `setShowsBaselineSeparator deprecated in macOS 15` warning confirms the macOS 15 SDK.
+- Cause: Wails v2.9.2 file-dialog code references `UTType` (UniformTypeIdentifiers framework, macOS 11+). The `wails` CLI links that framework automatically; a raw `go build` does not, so the framework is missing from the external link line (CoreFoundation/Security/Foundation/Cocoa/WebKit/AppKit were present, UniformTypeIdentifiers was not). Documented in the Wails troubleshooting guide and issues #1140/#3003.
+- Fix: `Makefile` now appends `-framework UniformTypeIdentifiers` to `CGO_LDFLAGS`, guarded by `ifeq ($(shell $(GO) env GOOS),darwin)` so only Darwin hosts are affected (Linux/Windows packaging unchanged). README Toolchain note documents the requirement.
+- Re-verify on the Mac: `make build && ./build/bin/pmforge` should now link AND open the GUI. Then `make package-macos-installer` for the `.pkg`.
+
+## 2026-06-15 - Switched the build to the Wails CLI (main package moved to repo root)
+
+- Decision (James): stop hand-rolling `go build` and use `wails build` so the CLI owns build tags + framework linking + frontend embed. Confirmed root-cause constraint via Wails docs/issues #2568: **wails build requires the main package at the project root**; PMForge's was in `cmd/pmforge`, which is exactly why it hand-rolled the build.
+- **Relocation:** `git mv cmd/pmforge/main.go ./main.go` plus the six `*_test.go` files; removed `cmd/`. The `//go:embed all:frontend/dist` directive is unchanged but now resolves to the real repo-root `frontend/dist` (the Vite output), eliminating the old `cp frontend/dist cmd/pmforge/frontend/dist` embed-copy hack. (Sandbox couldn't delete the generated `cmd/pmforge/frontend/dist` tree - it is gitignored/untracked; James should `rm -rf cmd` locally.)
+- **Build pipeline:** `Makefile` `build` target is now `$(WAILS) build $(WAILS_BUILD_FLAGS)` (overridable flags var). Removed the darwin `CGO_LDFLAGS` UniformTypeIdentifiers ifeq and the `-tags`/`-ldflags` raw-build line - wails build handles both. `GO_PACKAGES` -> `. ./internal/...` across Makefile, check-release.sh, memory-safety-scan.sh (also `PMF_DIRS` -> `./main.go ./internal ./scripts`). `release-gate-scope-check.sh` `go list` -> `. ./internal/...`. `validate-encrypted-db.sh` test path `./cmd/pmforge` -> `.`. `clean` target no longer wipes tracked `build/darwin`; `lint-go`/`license-check` paths fixed. `.gitlab-ci.yml` build/release jobs drop the tag-less `go build ./cmd/pmforge` and use the `build/bin/` output.
+- **macOS bundle scaffold:** added tracked `build/darwin/Info.plist` + `Info.dev.plist` (CFBundleIdentifier `dev.pmforge.PMForge`, productivity category, NSAllowsLocalNetworking for dev). `.gitignore` rewritten to ignore all of `build/` EXCEPT those two plists; REUSE.toml annotates them. wails build will generate any missing default assets (e.g. appicon) on first run - drop a 1024px `build/appicon.png` for branding.
+- **Installer:** `package-macos-installer.sh` rewritten to `make build` then pkgbuild the wails-produced `build/bin/*.app` (ad-hoc signed, xattrs stripped); no longer hand-assembles a bundle. Version read from wails.json. The package-linux/windows/darwin tarball targets and the deterministic-packaging scope gate are untouched (scope gate only forbids `wails build` inside package-{linux,windows,darwin} targets, which still call package.sh).
+- **Docs:** README (Toolchain build note, directory tree, applog path, test cmd), ARCHITECTURE, TESTING, STYLE, AGENTS.md, AGENT.md (tree, build-process lesson, gitignore/embed lessons, gate commands, App-method table), and code comments in `internal/templates/jdm.go` + `internal/export/pdf.go` updated to the root layout. Dated historical lessons in AGENT.md (524/743/767) and `.agent_memory/`+`docs/superpowers/` left as-is (records of past state).
+- **NOT verified here (no Go/wails toolchain in the Cowork sandbox).** James must run on the Mac:
+  - `go install github.com/wailsapp/wails/v2/cmd/wails@latest` (if not present)
+  - `rm -rf cmd` (remove the leftover generated tree)
+  - `make build` -> expect `build/bin/PMForge.app`; open it (or `open build/bin/*.app`) -> GUI should appear
+  - `go test . ./internal/...` and `make check-release`
+  - `make package-macos-installer` -> `.pkg`, then install
+  - Most-likely-to-need-a-tweak areas after a real wails run: the exact `.app` name under build/bin (installer globs `*.app`), and whether wails wants a `build/appicon.png` (add one if it complains).
+
+## 2026-06-15 - wails build self-sign failure on macOS 15 fixed with -skipbindings
+
+- `wails build` on James's Mac compiled, embedded, and packaged successfully, then FAILED at its own "Self-signing application" step: `codesign failed ... build/bin/pmforge.app/Contents/MacOS/pmforge: resource fork, Finder information, or similar detritus not allowed`.
+- Smoking gun: the build output contained `main.go:2962: PMForge exited cleanly` (our applog line) BEFORE packaging - i.e. Wails EXECUTED the freshly linked binary mid-build during binding generation. On macOS 15 (Sequoia) executing a binary stamps it with the `com.apple.provenance` xattr, and Wails' subsequent ad-hoc `codesign` rejects any such "detritus". Same root cause as flutter/flutter#181103 and Apple QA1940.
+- Fix: default `WAILS_BUILD_FLAGS ?= -skipbindings` in the Makefile so Wails does not build+run the app for binding generation (no execution -> no provenance -> self-sign succeeds). Safe for PMForge: the frontend uses `window.go.main.App` via the hand-written `frontend/src/wails-window.d.ts` and never imports the generated `frontend/wailsjs`. Also added `rm -rf build/bin` at the top of `package-macos-installer.sh` so a stale, previously-executed binary from an earlier run can't reintroduce the xattr.
+- Confirmation the app itself is healthy: the `PMForge exited cleanly` applog line proves the relocated root `main.go` + `wails build` binary launches and runs the full GUI startup path without the old silent-exit failure.
+- Re-verify on the Mac: `make build` (now `wails build -skipbindings`) should complete through self-sign; `open build/bin/*.app` shows the GUI; `make package-macos-installer` produces the `.pkg`.
+
+## 2026-06-15 - codesign detritus persisted after -skipbindings: wrap the build to strip+sign
+
+- `-skipbindings` correctly stopped Wails from running the app during build (the `PMForge exited cleanly` line disappeared), but `wails build`'s self-sign STILL failed with `resource fork, Finder information, or similar detritus not allowed`. So the offending extended attributes are NOT execution-provenance - they are `com.apple.FinderInfo` / iCloud file-provider metadata the build artifacts pick up because the repo lives under iCloud-synced `~/Documents/GitLab/...`. Wails signs in-process, so it cannot strip them first.
+- Fix: new `scripts/wails-build.sh` wraps `wails build`. It cleans `build/bin`, runs `wails build "$@"` (whose internal self-sign may fail - tolerated), then on darwin locates the produced `.app`, runs `xattr -cr` to strip the detritus, and ad-hoc signs with `codesign --force --deep --sign -` (+ verify). Apple QA1940's documented sequence. On non-darwin it just surfaces Wails' exit status. `make build` now calls this wrapper; `-skipbindings` is retained as the default flag (still correct for PMForge and avoids one provenance source).
+- `make build` therefore succeeds even though Wails' own self-sign step prints an error, because the wrapper re-signs after stripping. The installer's later copy+strip+sign remains as belt-and-suspenders.
+- If `xattr -cr` + sign still fails (iCloud re-adding attributes mid-sign), the durable cure is to build from a non-synced path (e.g. clone/build under `~/Developer`); the wrapper prints that hint. Pending James's re-run to confirm.
+
+## 2026-06-15 - QA review of test screenshots + P0 fixes implemented
+
+- Reviewed the 11 screenshots in *PM Forge Test 15-June-2026*. Full write-up in `docs/QA-review-2026-06-15.md`. Almost all reported errors reduce to two root causes; both P0 fixes are now implemented.
+- **Fix A - empty dates can't unmarshal into time.Time (the pervasive one).** `App.SaveChart`/`SaveStakeholder`/`UpdateProjectMeta`/`SaveDocument` take structs whose `CreatedAt`/`UpdatedAt` were `time.Time`; the frontend sends `created_at:""`/`updated_at:""` for new/edited records (e.g. `Dashboard.svelte` newChart), so Wails rejected the call with `parsing time "" as "2006-01-02T15:04:05Z07:00"` before the Go body ran. This caused the stakeholder-save, project-settings-save (and therefore theme-change), and new-chart failures.
+  - Changed `CreatedAt`/`UpdatedAt` from `time.Time` to `string` on `db.Chart`, `db.Document`, `db.Stakeholder`, `db.Project`; the scanners now assign the raw RFC3339Nano strings (the writers already used a server-side `now` string, and the TS `wails-window.d.ts` already typed these as `string`). Fixed the one consumer, the CPM-chart recency sort in `main.go` (`UpdatedAt.After` -> string `>`; RFC3339 sorts lexicographically). `BackupManifest.CreatedAt` is a different (non-bound) struct and stays `time.Time`.
+- **Fix B - multi-return methods resolved to null in the bridge.** `CreateProjectFromLaunchpad` (3 values) and `App.EnsureDefaultBoard` (2 values) were destructured as arrays in the frontend; the awaited result came back null, so destructuring threw `null is not an object (evaluating 'window.go.main.App.<m>(...)')` even though the Go call ran (hence projects were still created).
+  - Both now return a single struct: `LaunchpadResult{project,seeds,path}` and `BoardWithColumns{board,columns}`. Updated callers `ProjectLaunchpad.svelte`, `KanbanBoard.svelte`, `Backlog.svelte` (read `res.project`/`res.path`, `res.board`/`res.columns`), the `wails-window.d.ts` return types, and the Go test `encryption_project_test.go`.
+  - Removed the `-skipbindings` default from the Makefile so Wails generates bindings normally (needed for correct multi-value marshaling). The codesign-detritus issue that `-skipbindings` had masked is handled independently by `scripts/wails-build.sh` (xattr strip + ad-hoc re-sign), so bindings-on is safe.
+- **Not verified here (no Go/Node toolchain in the Cowork sandbox).** James to run: `make build` (now `wails build` + wrapper, bindings on), then `go test . ./internal/...`, `npm --prefix frontend run check`, and re-test in the GUI: create project (no error, opens), save stakeholder, save project settings, change theme, create a chart, open Kanban/Backlog.
+- Remaining from the review (P1/P2): certificate chooser in the signing modal, native menu bar, project delete/clone, global app settings, clickable chart-template panel.
+
+## 2026-06-15 - P1 work: project Delete/Clone + certificate chooser
+
+- **Project Delete + Clone** (Your Projects screen).
+  - Backend: `App.DeleteProject(path)` and `App.CloneProject(path) (ProjectFile, error)` in `main.go`, gated by a new `projectPathFor` helper that rejects any path not directly inside `<user.DataDir>/projects` and not ending in `.pmforge` (no traversal / arbitrary-file deletion). Delete removes the `.pmforge` plus `-wal`/`-shm` sidecars and closes the project first if it is the open one. Clone copies bytes verbatim to `<name>-copy.pmforge` (non-conflicting), so an encrypted project's clone stays encrypted under the same DEK; sidecars copied best-effort. Added a small `copyFile` helper (added `io` import). The picker derives the card name from the filename, so the clone shows as `<name>-copy` with no DB rename needed.
+  - Frontend: `ProjectPicker.svelte` rows now have Clone + Delete actions beside the open area (restructured so no nested buttons). Delete uses a two-step confirm (Delete -> Confirm/Cancel) matching the Dashboard pattern; a row is disabled while its op is in flight; deleting the open project clears the session. `wails-window.d.ts` declares `DeleteProject`/`CloneProject`.
+- **Certificate chooser in the signing modal.**
+  - `SignCertificateModal.svelte` gains a "Choose certificate…" button calling the existing `App.ChooseCertFile()`. A picked path overrides the passed-in `certPath` (`effectivePath = chosenPath || certPath`); Sign & Export is disabled until a certificate is present. The modal now reports the effective path back via `onConfirm(password, certPath)`.
+  - Updated the three callers' handlers to the 2-arg form and to sign with the passed path: `CharterEditor.svelte`, `ReportComposer.svelte`, `Dashboard.svelte`. All three already open the modal even when no cert is pre-configured, so the chooser is reachable everywhere.
+- P2 (still open): global app-settings screen, clickable chart-template panel.
+- **Verification owed (no Go/Node toolchain here):** `make build`, `go test . ./internal/...`, `npm --prefix frontend run check`; then GUI spot-checks: clone a project, delete a project (two-step), and run a signed export choosing a cert from the modal.
+
+## 2026-06-15 - P1: native application menu bar
+
+- Added `options.App.Menu: buildAppMenu(app)` in `main.go` (verified against the official Wails v2 menu reference - `menu.NewMenu()`, `AddSubmenu`, `AddText` + `keys.CmdOrCtrl`, `menu.AppMenu()`/`menu.EditMenu()` on darwin only). Imports: `pkg/menu` and `pkg/menu/keys`.
+- Structure: **File** (New Project Cmd+N, Open Project Cmd+O, Project Settings Cmd+comma, Close Project Cmd+W; plus a Quit item on non-macOS) and **Help** (About PMForge -> `wailsruntime.MessageDialog` showing `cli.Version`). On macOS the standard **App** menu (About/Hide/Quit) and **Edit** menu (copy/paste/select-all) are appended so those keep working under a custom menu. Order: App, File, Edit, Help.
+- Menu items don't navigate directly (navigation is frontend state): each File item calls `wailsruntime.EventsEmit(app.ctx, "menu:<action>")`. `App.svelte` `onMount` registers `window.runtime.EventsOn` listeners that map `menu:new-project` -> launchpad, `menu:open-project` -> project_picker, `menu:settings` -> project_settings (guarded on an open project), `menu:close-project` -> `CloseProject()` + clear session + project_picker. All navigation guards on `session.user`.
+- This addresses the report's "Need Open File / Help / About … with settings in drop down." A global application-settings *screen* (distinct from per-project settings) remains a P2 item; the menu's "Project Settings" routes to the existing per-project settings view.
+- **Verification owed (no Go/Node toolchain here):** `make build`, `go test . ./internal/...`, `npm --prefix frontend run check`; then in the GUI check the menu bar shows File/Help (and on macOS the PMForge + Edit menus), Cmd+N opens the launchpad, Cmd+W closes the project, and Help -> About shows the version.
+
+## 2026-06-15 - P2: chart-templates panel is now clickable
+
+- The Dashboard "Available chart templates" panel (grouped by engine) rendered each kind as static `<li>` text, so it read as broken (review item). Each entry is now a button calling the existing `newChart(c.kind, c.name)` - which creates a chart of that kind and routes to its editor. The backend `charts.Definition.Kind` strings (from `ListChartKinds`) exactly match the `chartStarters`/`chartRoutes` keys, so all 21 kinds work with no mapping. Added a "Click a template to create that chart." hint and hover affordance.
+- Hardened `newChart` with try/catch + `showToast` error feedback (benefits the existing New-Chart grid too, which previously called it bare).
+- Frontend-only change (`Dashboard.svelte`). Remaining P2: a global application-settings screen distinct from per-project settings.
+
+## 2026-06-15 - P2: global Application Settings + Portfolio dashboard + shared toolbar
+
+- **Global Application Settings** (per-user, app-level, distinct from per-project settings).
+  - Backend (`main.go`): `AppSettings{DefaultFont, DefaultTheme}` persisted as JSON at `<user.DataDir>/app-settings.json` (independent of any project DB). `App.GetAppInfo()` returns the settings + read-only info (version, data location, username) + the font catalog (`a.ListFonts()`); `App.SaveAppSettings(s)` writes the file. `applyGlobalDefaults(d)` seeds a newly created project's per-project settings (font/theme) from these app defaults - best-effort, called in both `CreateProject` and `CreateProjectFromLaunchpad`. So the app-level defaults are real, not inert.
+  - Frontend: `AppSettings.svelte` (edit default font from the catalog + export theme; shows version / signed-in user / data location).
+- **Portfolio dashboard** (post-login landing).
+  - Backend: `App.ProjectsOverview() []ProjectSummary` opens each project in the user's folder with the session DEK (read-only, leaves the active project untouched), reading status/phase/start/end + chart and document counts; unreadable projects are still listed (`readable=false`).
+  - Frontend: `Portfolio.svelte` shows each project as a card with a status badge, phase/dates, and counts; in-progress (planning/active/on_hold/unknown) sorted first, then by last-modified; click opens the project -> per-project dashboard. Shows "N active · M total".
+- **Shared toolbar** `AppHeader.svelte` (Dashboard / Projects / App Settings + signed-in-as + Sign out) used by Portfolio, ProjectPicker, and AppSettings. The old bespoke ProjectPicker header (and its duplicate logout) was removed in favour of it.
+- **Routing/landing**: added `portfolio` and `app_settings` to the session view union and `App.svelte` route loaders. Post-login now lands on `portfolio` (Login, CreateAccount, and the resume-session path); per-project Close and the menu's Close Project also return to `portfolio`.
+- **Native menu**: File menu gains **Dashboard** (Cmd+D -> `menu:dashboard`) and **Application Settings…** (Cmd+, -> `menu:app-settings`); Project Settings lost its accelerator (Cmd+, is now app-level prefs, the macOS convention). `App.svelte` listens for the two new events.
+- d.ts: declared `ProjectsOverview`/`GetAppInfo`/`SaveAppSettings` + `ProjectSummary`/`AppInfo`/`AppSettings` interfaces.
+- **Verification owed (no Go/Node toolchain here):** `make build`, `go test . ./internal/...`, `npm --prefix frontend run check`; then GUI: log in -> lands on Portfolio with project statuses; toolbar switches Dashboard/Projects/App Settings; App Settings saves a default font/theme and a newly created project inherits them; Cmd+D / Cmd+, work.
+- All QA-review items (P0+P1+P2) are now addressed.
+
+## 2026-06-15 - Multi-user isolation investigation + dialog scoping + 4 fonts (batch 1 of a larger request)
+
+- **User-isolation investigation (reported: "adding another user, saw other user's projects in-app").** Audited the session/enumeration paths: `Login` and `CreateAccount` both switch `a.user`+`a.dek` under lock; `Logout` clears them; `requireUser`/`CurrentUser` return `a.user`; `ListProjects`/`ProjectsOverview` read `a.requireUser().DataDir/projects` (per-username `<root>/<username>/projects`); cross-user `OpenProject` is rejected by the wrong DEK. **The current source is correctly per-user isolated** - no in-app enumeration leak is present. Most likely the observation was on an earlier build, or files were seen via a native file dialog / Finder on disk (all users live under one OS home; contents are per-user-DEK encrypted, but the *files* are visible to the same OS user).
+  - Added a regression test `user_isolation_test.go::TestProjectsAreIsolatedPerUser` (alice creates a project; bob, a new user, must see 0 via both `ListProjects` and `ProjectsOverview`). Locks the invariant so any future regression fails CI.
+  - Defense-in-depth: the three native file pickers (`ImportMSPDIChart`, `ChooseCertFile`, `ImportFont`) now set `DefaultDirectory: a.userDir()` so they open in the signed-in user's own folder. NOTE: this only sets the dialog's initial directory (the user can still navigate up) - it is a nudge, not a hard boundary; real protection remains per-user encryption.
+  - **Still owed (if the in-app leak is reproducible):** James to send exact repro steps; I couldn't reproduce it in the current code.
+- **Fonts:** added Roboto (Apache-2.0, sans), Arimo (Apache-2.0, Arial-metric sans), Cousine (Apache-2.0, mono), Ledger (OFL-1.1, serif) to `internal/fonts/catalog.go`, with best-effort download URLs in `scripts/fetch-fonts.sh` (NOTEs: google/fonts paths drift; build tolerates missing files), REUSE.toml annotations, and a README catalog row each. They appear in the font picker once fetched.
+- **Sequenced (not yet done - large, each its own verifiable pass):**
+  1. Per-project unique-ID subfolders (`<projects>/<YYYYMMDD-HHMMSS>-<name>/project.pmforge`) with backward-compat for existing flat `.pmforge` files - touches list/create/open/delete/clone/overview/backup/headless + migration.
+  2. Relicense entire repo to **Apache-2.0** + attribution to **"James L. Burns and The PMForge Contributors"** - repo-wide SPDX/header change, preserving third-party licenses (OFL/Bitstream-Vera/CC0-for-ICC); update LICENSES/, REUSE.toml, README; must pass `reuse lint`.
+  3. Full **Light/Dark** application theme - the app is currently all-dark hardcoded Tailwind; needs a theme mechanism + re-theming every component.
+- **Verification owed (no Go/Node toolchain here):** `go test . ./internal/...` (incl. the new isolation test), `make build`, `npm --prefix frontend run check`.
+
+## 2026-06-15 - Per-project unique-ID subfolders (with legacy compatibility)
+
+- Decision: keep GPLv3 for now (Apache-2.0 relicense task dropped; the attribution-text change to "James L. Burns and The PMForge Contributors" remains a small queued item).
+- New on-disk layout: each project lives in its own time-stamped subfolder `…/projects/<YYYYMMDD-HHMMSS>-<safe-name>/project.pmforge` (unique ID = date+time+name, per the request). Implemented in `main.go`:
+  - `newProjectPath(dir, safe)` creates the unique subfolder (collision-deduped) and returns the inner `project.pmforge` path. Used by `CreateProject` and `CreateProjectFromLaunchpad`.
+  - `enumerateProjects(projectsDir)` lists BOTH the new subfolder layout AND legacy flat `<name>.pmforge` files, so pre-existing projects keep working (no destructive migration). `ListProjects` and `ProjectsOverview` now use it; `projectDisplayName` strips the timestamp prefix for the picker, and `ProjectsOverview` prefers the real DB project name.
+  - `projectPathFor` now accepts a file directly in `projects/` (legacy) OR one level deep in `projects/<id>/` (new), still rejecting anything outside the user's projects tree.
+  - `DeleteProject` removes the whole project subfolder for the new layout (`os.RemoveAll(parent)`, proven to be an immediate child of the user's projects dir) and falls back to file+sidecar removal for legacy flat files. `CloneProject` creates a fresh unique subfolder named "<source> copy".
+  - `inferHeadlessRootDir` steps up out of the per-project subfolder so `--check`/`--repair` on `…/projects/<id>/project.pmforge` still resolves the root.
+- Tests: `project_storage_test.go` covers `projectDisplayName`, `enumerateProjects` across both layouts (+ ignoring non-project subfolders), and the full create→clone→delete lifecycle (unique timestamped folder, clone in a new folder, delete removes the folder). The earlier isolation test still applies.
+- Frontend needs no change (it's path-based); the picker now shows de-prefixed names and the portfolio shows real DB names.
+- **Verification owed (no Go toolchain here):** `go test . ./internal/...` and `make build`.
+- Remaining from this batch: Light/Dark full theme; small attribution-text change.
+
+## 2026-06-15 - Light/Dark theme + repo-wide attribution (GPLv3 retained)
+
+- **Attribution:** decided to KEEP GPLv3 (no Apache relicense). Ran a safe repo-wide sed `2026 The PMForge Contributors` -> `2026 James L. Burns and The PMForge Contributors` across 335 files (SPDX-FileCopyrightText + Copyright lines). The full-string match avoided double-prefixing already-correct files and never touched third-party copyrights (Red Hat/Bitstream/Google/JetBrains/Ledger/ICC). Verified: no `James L. Burns and James L. Burns`, zero remaining bare strings.
+- **Full Light/Dark theme** via CSS variables + Tailwind, with NO per-component class rewrites:
+  - `tailwind.config.js` remaps the `slate` scale and `cyan` accent to `rgb(var(--x) / <alpha-value>)` (channel triplets, so opacity modifiers like `bg-slate-800/40` still work). Tailwind `extend` deep-merges, so untouched shades keep defaults.
+  - `src/app.css` defines the variables: `:root` = dark (normal Tailwind values, so dark mode is visually unchanged); `:root[data-theme="light"]` inverts the slate scale (950 = lightest page bg, 50 = darkest text, 500 = mid) and darkens the light cyan text shades for contrast; `color-scheme`/`accent-color` flip too.
+  - Emphasis `text-white` (61 occurrences, those NOT on a colored button) converted to `text-slate-50` so they flip; the 58 button labels on colored backgrounds keep `text-white`.
+  - Setting + plumbing: `AppSettings.AppTheme` (light|dark, "" => dark) persisted in app-settings.json; `AppSettings.svelte` gains an Appearance -> Application theme selector with instant preview + Save; `frontend/src/lib/theme.ts` `applyTheme()` toggles `data-theme` on `<html>`; `App.svelte` `$effect` applies the user's theme on sign-in and reverts to dark on sign-out (login screen is always dark). d.ts updated.
+  - Scope note: accent families other than cyan (red/emerald/amber status colors) stay default - they read acceptably on both themes; their light-shade *text* is slightly lower-contrast in light mode (documented polish item). Chart/SVG renderers keep their own palette by design.
+- **Verification owed (no Go/Node toolchain here):** `npm --prefix frontend run check`, `make build`, `go test . ./internal/...`. Then GUI: App Settings -> switch to Light (instant preview) -> Save -> relogin stays Light; toggle back to Dark; confirm contrast across portfolio/picker/dashboard/editors.
+- Next: PMForge app icons from the image files in the repo root.
+
+## 2026-06-15 - PMForge app icon for wails build
+
+- Rendered the tracked vector `pmforge-icon-dark.svg` (navy rounded tile + cyan Gantt/anvil symbol, transparent corners, soft shadow) to `build/appicon.png` at 1024x1024 via cairosvg. This is the master icon Wails uses; `wails build` derives the macOS `.icns` (the bundle's `iconfile`, already referenced by build/darwin/Info.plist's CFBundleIconFile) and the Windows `.ico` from it automatically.
+- Chose the SVG over the root PNG sources ("PMForge Icon Image ….png" is portrait 784x1168 and gitignored) because the SVG is tracked, square, and renders crisply at any size - reproducible from source.
+- Tracking: `.gitignore` now un-ignores `build/appicon.png` (alongside the build/darwin plists); `REUSE.toml` annotates it (GPL-3.0-or-later, James L. Burns and The PMForge Contributors) since it's a binary.
+- No HTML favicon added: the running desktop app's window/taskbar icon comes from the generated `.icns`/`.ico`, not a web favicon.
+- **Verification owed (no Go/Node/wails toolchain here):** `make build` on the Mac, then confirm `build/bin/<app>.app` shows the PMForge icon in Finder/Dock; `reuse lint` stays clean.
+
+## 2026-06-15 - Theme-aware in-app logo
+
+- New `frontend/src/lib/components/Logo.svelte`: inline SVG of the PMForge wordmark + Gantt/anvil mark. The cyan accent (#00D4FF) is constant; the timeline gridlines and "PMForge" wordmark use `currentColor`, so the logo's ink follows the surrounding text colour and flips automatically with the light/dark theme - one component, no file swapping, transparent background. Sized via the `class` prop (4:1 viewBox, width tracks height).
+- Replaced the plain "PMForge" text wordmarks: `AppHeader.svelte` (toolbar; `h-6`, wrapped in a Dashboard "home" link) and `auth/Login.svelte` (`h-10`, centered). Both pass a flipping `text-slate-50/100`, so the logo inherits the theme ink.
+- Verified composition by rendering both ink/bg combinations (light ink on dark, navy ink on light) - reads cleanly in both themes.
+- The standalone `pmforge-logo-{dark,light}.svg` files are kept as brand assets; the in-app logo intentionally uses a transparent, currentColor variant rather than those (which carry their own background + grid).
+- Verification owed: `npm --prefix frontend run check`, then visually confirm the logo in the header + login under both themes.
+
+## 2026-06-15 - Project interchange: CSV/HTML/MS Project XML export + import scoping
+
+- Request: open/use .mpp/.mpx/.xml/.pod; export to MS Project XML, CSV, HTML.
+- **Exports** (Project Settings → Schedule Reports). The export engine already had CSV and MSPDI (ToMSPDI); added an HTML renderer `internal/export/html.go` (`FormatHTML` + engine dispatch) - a self-contained, printable schedule table with critical-path highlighting + optional EVM. Wired three new App methods `ExportScheduleReport{CSV,HTML,MSPDI}` and fixed `exportScheduleReportAs` to map extensions via a switch (it previously defaulted PDF to `.docx` - latent bug now fixed: pdf/.pdf, csv/.csv, html/.html, mspdi/.xml, odt/.odt, docx/.docx). d.ts + three new ProjectSettings buttons (Export CSV / HTML / MS Project XML).
+- **Imports.** MS Project XML (MSPDI, `.xml`) import already worked; broadened the dialog to also list `.mpp/.mpx/.pod` and added `importScheduleFile(path)` routing: `.xml` → MSPDI parser; `.mpp`/`.pod`/`.mpx` → a precise, actionable error telling the user to re-save as MS Project XML from MS Project/ProjectLibre and import that.
+- **Honest scope note:** `.mpp` (OLE binary) and `.pod` (Java-serialized) cannot be parsed in pure Go; the only robust reader is the Java MPXJ library, which would break the dependency-free/local-first design. `.mpx` is a feasible-but-obsolete text format - deferred to the same MSPDI path for now. If true native `.mpp`/`.pod` reading is ever required, the path is bundling/shelling to MPXJ (adds a Java runtime dependency) - flagged, not done.
+- Tests: `internal/export/html_test.go` (HTML render + escaping) and `import_formats_test.go` (the .mpp/.mpx/.pod branches return the MSPDI-conversion message). Docs: README "Project interchange" section.
+- **Verification owed (no Go/Node toolchain here):** `go test . ./internal/...`, `npm --prefix frontend run check`, `make build`; then GUI: Project Settings → export CSV/HTML/MS Project XML; Dashboard → Import schedule with a .mpp/.pod (expect the guidance message) and with a real MSPDI .xml (expect a CPM chart).
+
+## 2026-06-18 - Manual + timed auto-save with configurable interval
+
+- Request: manual and timed automatic saving, with a settings option to change the auto-save interval and turn it off/on.
+- **Setting.** Added `AutoSaveSeconds int` to `AppSettings` (Go) + `auto_save_seconds: number` to the d.ts. `0` disables auto-save. New `defaultAppSettings()` returns `{AutoSaveSeconds: 60}`; `loadGlobalAppSettings()` now falls back to those defaults when no settings file exists (so brand-new users get auto-save on at 60s; an existing file with `0`/absent key reads as off and can be toggled on). `SaveAppSettings` already marshals the whole struct, so it persists automatically.
+- **Coordinator.** New `frontend/src/lib/autosave.svelte.ts`: a single 1s heartbeat saves each registered editor whose snapshot string changed since its last save, once per `intervalSeconds`. Snapshot-based = no save when idle (no `updated_at` churn). `autosave.setInterval(s)` (0=off) + `autosave.register(snapshot, save) -> stop()`.
+- **Loaded** in `App.svelte` on sign-in (`GetAppInfo().settings.auto_save_seconds`) and reset to 0 on sign-out; applied immediately when saved in `AppSettings.svelte` (new "Saving" section: enable checkbox + interval select 15/30/60/120/300s).
+- **Wired into every editor** (register after the doc loads so the baseline snapshot is the saved state; unregister in onDestroy): the two shared shells `_layered_editor_shell` (network/pert/cpm) and `_stats_editor_shell` (8 stats charts), the 10 standalone chart editors (Activity, CauseEffect, Fishbone, Gantt, Matrix, RACI, SWOT, Stakeholder, WBS, Workflow), and `documents/CharterEditor` (all 25 doc kinds; snapshot covers field content + title). Matrix/RACI/SWOT gained an `onDestroy` (+ import) for cleanup.
+- Manual save (Ctrl/Cmd+S + Save button) unchanged.
+- Tests: `app_settings_test.go` (default = 60; load fallback = 60). Docs: README "Auto-save" subsection.
+- **Verification owed (no Go/Node toolchain here):** `go test . ./internal/...`, `npm --prefix frontend run check`, `make build`; then GUI: Application Settings → Saving (toggle off/on, change interval, Save); open a chart and a document editor, make an edit, wait one interval, confirm it persists without pressing save; set interval off and confirm no auto-save; confirm idle editors don't bump the portfolio "modified" order.
+
+## 2026-06-18 - Fast `make verify` gate + CI lockstep (regression hardening)
+
+- Context: this session's two build breakages (a 1-char test username < the 3-32 char `usernameRE`, and a `*/` accidentally embedded in an `app.css` comment that closed the comment early) reached the desk because the manual chain run was a subset. The full `make check-release` would have caught both (frontend-build-budget runs `vite build`; race/test runs `go test`), but it's heavy and wasn't run.
+- Added `make verify` = `test` + `frontend-stability` (svelte-check --fail-on-warnings) + `frontend-build-budget` (Vite build). One fast command that catches failing Go tests, type/svelte errors, and frontend/CSS build errors. Registered in `.PHONY`.
+- `.gitlab-ci.yml`: the `test` job now runs `make verify` (single source of truth; local + CI can't drift). Fixed a latent `before_script` bug where `cd frontend && npm ci` left CWD in frontend/ so the following `make fonts` would have run from the wrong dir - now a subshell `(cd frontend && npm ci)`.
+- Docs: README Quick start now leads with `make verify` as the pre-commit gate and explains verify vs check-release.
+- **Deliberately deferred (needs visual QA, not done blind):** Light-theme contrast on the semantic accent colors (emerald/amber/red). Only slate + cyan are remapped to theme CSS vars today; emerald/amber/red text shades (200-400) stay light and read poorly on light surfaces. A correct fix can't be a blanket palette inversion - badge backgrounds use a *mix* of light-shade (`bg-emerald-600/20`) and dark-shade (`bg-emerald-900/50`) tints, and solid action buttons (`bg-red-600 text-white`) would regress if 600 is lightened. This needs a per-pattern pass with the app rendered in light mode to verify contrast. Flagged as the next UI task.
+- **Verification owed (no toolchain here):** `make verify` (should pass and now also guards future changes); on tags, `make check-release`.
+
+## 2026-06-19 - Six Sigma launchpad project activation bug fix
+
+- **Bug:** When a project was created via the Project Launchpad (`CreateProjectFromLaunchpad`), all chart/document operations failed immediately ("no project open") until the user manually closed and reopened the project. This was the Six Sigma (and any other launchpad-created) project reported by the user.
+- **Root cause:** `CreateProjectFromLaunchpad` closes the project DB at the end (`_ = d.Close()`) and a comment in the code said it "relies on OpenProject to install the project as the app's active one" - but the `onCreated` callback in `App.svelte` never called `OpenProject`. So `a.db` was nil after creation.
+- **Fix:** At the end of `CreateProjectFromLaunchpad` (after `d.Close()`), now calls `a.OpenProject(path)` to set the active DB. This also fixes the stale-DB sub-case where creating a launchpad project while another was open would have left the old project active.
+- **Test:** Added `TestCreateProjectFromLaunchpadActivatesProject` in `encryption_project_test.go` that calls `ListCharts` without calling `OpenProject` first. Test confirmed: fails (red) without the fix, passes (green) with it. Race detector clean.
+- **Verification owed (GUI):** The toolchain here (Vite-only preview, no Wails backend) cannot exercise `window.go.*` calls. Hand-verify: create a new Six Sigma project via Launchpad, immediately click a chart or document without closing+reopening - it should now work. `make verify` passes.
+- **Still deferred:** Light-theme contrast on semantic accent colors (emerald/amber/red). See the 2026-06-18 note for the approach and the per-pattern badge co-occurrence caveat that must be resolved before the CSS variable remapping can be called done.
+
+## 2026-06-19 - Light-theme contrast: semantic color CSS variable remapping
+
+- **Problem:** `text-red/emerald/amber/orange/rose/sky-{200-400}` are pastel shades that work on dark surfaces but fail WCAG AA on white (light mode). Additionally, badge patterns like `bg-emerald-900 text-emerald-200` would become dark-on-dark in light mode if only text was remapped.
+- **Scope decision:** Added shades 100–400 (text) and 900+950 (badge/alert backgrounds) for red/emerald/amber to CSS variables. Added 300+950 for orange/rose/sky. Shades 500–800 (action buttons: `bg-red-600 text-white`) left as standard Tailwind — they have sufficient contrast and would regress if lightened.
+- **Badge co-occurrence:** The common `bg-X-900 text-X-200` pattern (RACI, SprintList, DORADashboard, StakeholderManager, KanbanBoard badges; Toast; TollgateChecklist alerts; CPM warnings) inverts correctly — 900 → 100 (pale tint), 200 → 800 (dark text) — so both bg and text flip together.
+- **SWOT editor** uses `bg-{color}-950/30` transparency tints. In light mode these become the 50-shade at /30 opacity, which is a very subtle tint. Acceptable degradation; dark borders remain visible.
+- **amber-700 (#b45309) fails WCAG AA (3.5:1 vs white):** amber-300/400 remap to amber-800 (not 700).
+- **Files changed:** `frontend/tailwind.config.js` (add 6 color entries with specific shades), `frontend/src/app.css` (add vars to `:root` with dark defaults; add overrides to `:root[data-theme='light']` with remapped values).
+- **Visual verification:** Vite preview confirmed dark mode badges (dark bg + light text) unchanged; light mode badges correctly inverted (pale bg + dark text); standalone text readable in both modes.
+- **Verification owed:** Full visual QA with the Wails app running in light mode — open Portfolio, a Kanban board, a RACI chart, the DORA dashboard, and the TollgateChecklist. `make verify` passes.
+
+## 2026-06-19 - Portfolio search + filter; Dashboard kind labels
+
+**Portfolio (`Portfolio.svelte`):**
+- Added live name search input (bound to `query`, case-insensitive substring match).
+- Added three filter tabs — All (N) / Active (N) / Done (N) — where Active = planning/active/on_hold and Done = complete/cancelled. Counts reflect the full unfiltered list so the user can see scope at a glance.
+- Empty state distinguishes "no projects yet" (zero collection) from "no projects match your search" (filtered to zero).
+- Header stat line switches to use the new `counts` derived object; counts are always against the full project list regardless of current tab/search.
+
+**Dashboard (`Dashboard.svelte`):**
+- Added `chartKindLabel` map (from the existing `newChartCards` array) and `docKindLabel` derived map (from `docKinds` loaded on mount).
+- Existing-charts list now shows "CPM Chart" instead of "cpm", "Work Breakdown Structure" instead of "wbs", etc.
+- Existing-documents list now shows "Project Charter" instead of "charter", "Risk Register" instead of "risk_register", etc.
+
+**Verification:** `make verify` passes. Visual QA in the Vite preview confirmed all Portfolio states (all/active/done tabs, search filter, no-match empty state). Wails-backend verification owed (portfolio with real projects; dashboard chart and document kind labels).
+
+## 2026-06-19 - Window maximize menu + minimum size
+
+- macOS: added `menu.WindowMenu()` after the Edit menu in `buildAppMenu`. This gives Minimize (Cmd+M), Zoom (native fullscreen/maximize), and Bring All to Front with zero custom code.
+- Windows/Linux: added a "Window" submenu with "Maximize / Restore" (F11 -> `wailsruntime.WindowToggleMaximise`) and "Minimize".
+- Added `MinWidth: 800, MinHeight: 600` to the Wails app options so the window cannot be shrunk to an unusable size.
+- **Verification owed:** test macOS Zoom menu item, Windows F11 key, and that the window respects minimum sizes.
+
+## 2026-06-19 - Code quality audit + data management controls
+
+**Go backend audit findings (`main.go`, `internal/db/`, `internal/users/`, `internal/crypto/`, `internal/agile/`):**
+- No SQL injection risk (all parameterized queries).
+- Mutex discipline correct throughout (`sync.RWMutex`; read ops RLock, writes Lock).
+- Path traversal protected via `projectPathFor()` + `sanitizeFilename()`.
+- Crypto layer: AES-256-GCM + Argon2id KDF (OWASP 2023 params). Correct.
+- User auth: username regex rejects path chars; transparent re-hash on login; user dirs chmod 0700.
+- Backup system: integrity-gated, VACUUM INTO snapshot, atomic rename. Correct.
+- `internal/db/repair.go`: VACUUM INTO + atomic rename, split to allow caller-controlled close. Correct.
+
+**Fixed — `CloneProject` WAL checkpoint race (`main.go`):**
+When the source is the currently-open project, raw `copyFile` + sidecar copy could race against a WAL checkpoint and produce a clone missing committed data. Fixed: when `samePath(a.dbPath, clean)` is true, use `db.CreateSnapshot` (VACUUM INTO) for an atomic consistent copy. Closed projects continue using the existing copy+sidecar path.
+
+**Fixed — audit logging for destructive operations (`main.go`):**
+`audit_log` table and `LogAction()` existed but were only called for archive/signature events. Added `LogAction(actor, action, id, "")` calls (best-effort, `_ =`) before the actual delete in:
+- `DeleteChart` — action: `"delete_chart"`
+- `DeleteDocument` — action: `"delete_document"`
+- `DeleteWorkItem` — action: `"delete_work_item"` (adds explicit `requireDB()` guard; `agileStore()` still called for the operation)
+Actor is `a.requireUser().Username` or `"unknown"`. `DeleteProject` not logged (audit log is inside the project being deleted).
+
+**Verification:** `go build ./...` clean on all changes.
+
+## 2026-06-20 - Security tests: APFS collision regression + DEK-orphan guard
+
+**`TestCreateAccount_RejectsCaseVariantUsername`** (`internal/users/store_test.go`): regression gate for the `lower(username)` fix. Creates "alice", then asserts that "Alice", "ALICE", and "aLiCe" each return `ErrUserExists`. Passes on case-sensitive CI without depending on APFS — exercises the SQL check directly.
+
+**`TestHasLegacyRecoveryCodeWraps`** (`internal/users/dek_test.go`): covers the three states of the DEK-orphan guard — (1) no codes → false (does not block encryption enablement), (2) nil-DEK legacy codes → true (forces re-issue before enabling encryption), (3) codes re-issued with DEK → false (guard clears correctly). `HasLegacyRecoveryCodeWraps` coverage: 0% → 80%.
+
+**`RemainingRecoveryCodes` skip:** `SELECT COUNT(*)` always returns one row so `sql.ErrNoRows` in that function is unreachable. No test written — defensive guard, not exercisable logic.
+
+**Coverage:** `./internal/users/...` 61.6% → 63.5%. `make check-release` clean.
+
+**"James" account deleted:** Removed the capitalized-"James" row from `~/Documents/PMForge/system.db` (`DELETE FROM users WHERE username = 'James'`). No filesystem changes — the directory is shared with "james" on APFS and deleting it would wipe james's projects.
+
+## 2026-06-20 - Cross-account project name leak fix (APFS case-insensitive collision)
+
+**Root cause:** `CreateAccount` used `WHERE username = ?` (case-sensitive), so accounts "James" and "james" were both created in system.db. On APFS, `~/Documents/PMForge/James` and `~/Documents/PMForge/james` resolve to the same physical directory. Both accounts share one data dir, so `james` can see the names of `James`'s `.pmforge` files in the portfolio.
+
+**Exposure:** Project names only. The "Could not read project details." error confirms the current session's DEK cannot decrypt the other account's files — project contents are not exposed.
+
+**Fix:** `internal/users/store.go` — changed the duplicate check in `CreateAccount` from `WHERE username = ?` to `WHERE lower(username) = lower(?)`. Two accounts whose names differ only by case can no longer be created. `go build ./internal/users/...` confirms clean.
+
+**Existing collision:** The two accounts ("James", "james") shared `~/Documents/PMForge/James` on disk. The "James" account row was later removed from system.db (see session above). No filesystem changes.
+
+## 2026-06-20 - UI/UX polish pass
+
+**Deleted `Settings.svelte`** (orphaned — never routed from `App.svelte`, shadowed by `AppSettings.svelte` and `ProjectSettings.svelte`). 209 → 208 svelte-check files.
+
+**`AppSettings.svelte` — Save button relocated to page footer:**
+- Previously the Save button was inside the "Defaults for new projects" section, implying it only saved defaults. It actually saves all three sections (Appearance, Saving, Defaults).
+- Moved the Save/status line outside all sections into a dedicated `<div class="flex items-center gap-3 pt-2">` at the end of the form. Button label changed "Save" → "Save settings" for clarity.
+
+**`Dashboard.svelte` — four targeted fixes:**
+1. `newCharter()` and `newDocument()` both lacked try/catch. Added error handling with `showToast` so backend failures surface to the user instead of silently rejecting.
+2. Document status shown as plain text (`d.status`). Replaced with a styled `docStatusStyles` badge map (draft=slate, review=amber, approved=emerald, archived=muted-slate) matching the existing `statusStyles` pattern for project statuses.
+3. Document rows: improved layout — title now truncates cleanly, status badge and version are grouped in a shrink-0 right-side div.
+4. Delete buttons ("Del") renamed to "Delete" with proper `aria-label` attributes on both chart and document rows. Confirm/cancel buttons now use consistent colours (`bg-red-700`, `bg-slate-700 text-slate-300`).
+
+**Verification:** `svelte-check` 0 errors/208 files; `vite build` clean; `make frontend-smoke` → App loaded and rendered.
+
+## 2026-06-20 - Wails visual QA (light mode + window mgmt + launchpad)
+
+**Window management (macOS):** Zoom (Window > Zoom) fills the display and restores on second click. Cmd+M minimizes to Dock, clicking restores. Full Screen (Ctrl+F) is in the Window menu. All pass.
+
+**Dashboard returning-user flow (Test Six Sigma project):** PLANNING status badge renders inline with the project title. Subtitle shows "initiation · six_sigma" (phase · methodology joined with ` · `); dates omitted when not set. Existing CHARTS and DOCUMENTS sections appear above the NEW CHART creation grid. All correct.
+
+**Light mode visual QA (app theme = Light):**
+- Portfolio: status badges (PLANNING, UNKNOWN), error states, search/filter UI — all legible.
+- App Settings: form fields, dropdowns, checkbox, save button — all legible.
+- Project Dashboard: header badge, section labels, chart/doc list rows — all legible.
+- RACI Matrix editor: role/task inputs, `+ Role`/`+ Task` buttons, instruction text — correct.
+- Kanban board: four columns (TO DO/IN PROGRESS/REVIEW/DONE), WIP-limit badges, empty-state "Drag a card here" text — correct.
+- DORA Dashboard: four metric cards (Deployment Frequency/Lead Time/CFR/MTTR), 30-day deployment chart, Deployment Log empty state — correct.
+- Fishbone Diagram editor: canvas, EFFECT panel, "Apply 6 Ms preset"/Category buttons — correct.
+
+**Six Sigma launchpad bug (fixed):** Created new Engineering > Manufacturing > Six Sigma project. App navigated directly to the project dashboard without requiring a reopen. Immediately clicked "Root cause (Fishbone)" starter chart — editor opened correctly. Bug is confirmed fixed.
+
+**TollgateChecklist — navigation gap found:** `TollgateChecklist.svelte` lives in `frontend/src/lib/components/sigma/TollgateChecklist.svelte` and is rendered by `SigmaProjectView` (`sigma_project` route). However, neither `sigma_dashboard` nor `sigma_project` has any incoming navigation from the Portfolio, main project Dashboard, or top nav. The sigma workspace routes are orphaned — not reachable through the current UI. Flagged for follow-up wiring.
+
+## 2026-06-20 - REUSE compliance restored + audit/WAL tests
+
+**REUSE compliance failure fixed (`make check-release` was blocked):**
+- Root cause 1: `cmd/pmforge/frontend/dist/` — stale embed-copy directory from the 2026-06-15 main-package relocation. Not covered by `/frontend/dist/` in .gitignore (different path). Deleted the entire `cmd/` directory (no tracked files remain there after the relocation; session notes from 2026-06-15 said "James should `rm -rf cmd` locally" but it was never done). Added `/cmd/` to `.gitignore` to guard against accidental recreation.
+- Root cause 2: `frontend/package.json.md5` — generated npm checksum file, not gitignored. Added to `.gitignore`.
+- Root cause 3: `build/bin/**` and `build/packages/**` — gitignored artifacts that `reuse` 6.x scans regardless of `.gitignore`. Added `REUSE.toml` glob annotations for these paths (GPL-3.0-or-later as derived works).
+- `reuse lint` now 363/363 files compliant. All 11 `make check-release` gates pass: "PMForge is ready for release."
+
+**New test file `audit_actions_test.go`** (4 tests, race-clean):
+- `TestCloneOpenProject_DataSurvivesSnapshot`: Saves a chart to the open project, clones it while open (`a.db != nil` triggers VACUUM INTO), opens the clone, and asserts the chart is present by ID and title. This is the actual WAL-fix invariant — a raw `copyFile` can produce a file that passes `IsEncryptedFile` yet is missing WAL-only data.
+- `TestDeleteChart_WritesAuditLog`: Creates a chart, deletes it, queries `audit_log` directly via `app.db.Conn` to assert one `delete_chart` row with the correct `target_id`.
+- `TestDeleteDocument_WritesAuditLog`: Same pattern for `delete_document`.
+- `TestDeleteWorkItem_WritesAuditLog`: Enables agile, creates a board, saves a work item, deletes it, asserts `delete_work_item` in `audit_log`.
+
+Verification: `go test -count=1 -race -run "TestClone|TestDelete.*Audit" . → ok (all 4 pass)`; `make check-release` re-run on final tree → all 11 gates pass: "PMForge is ready for release." README not updated (no user-facing changes in this session).
+
+## 2026-06-19 - Dashboard UX restructure: return-user flow first
+
+**`Dashboard.svelte`:**
+- **Section reorder:** Moved "Existing charts" and "Existing documents" to the top of the main content (immediately after the Stakeholders/Timeline/Budget nav row). Both sections are only rendered when items exist (`{#if charts.length > 0}` / `{#if docs.length > 0}`). The "New chart" grid, "New document" actions, Agile pack, and template reference sections remain below. This serves returning users who want to continue work without scrolling through a 21-card creation grid.
+- **Richer project header:** Added a color-coded status badge (same `statusStyles` pattern as Portfolio) inline with the project name. Added a subtitle line: phase, methodology, and date range (`start_date → end_date | ongoing`) — all joining with ` · ` and omitting empty fields. `statusLabel` helper converts `on_hold` -> "on hold".
+- **`SignCertificateModal` nesting bug fixed:** The modal was accidentally rendered inside the `<div class="grid">` element due to incorrect indentation/nesting. Moved it outside `<main>` entirely (between `<header>` and `<main>`), which is the correct location for a fixed-position overlay.
+- **Template section headings simplified:** "Available document templates (N)" -> "Document templates (N)"; "Available chart templates (N)" -> "Chart templates (N)".
+- **Verification:** `svelte-check` 0 errors/209 files; `vite build` clean. Wails-backend verification owed (open a project, confirm status badge, dates, and returning-user section ordering).
